@@ -251,6 +251,10 @@ def _skill_variants(skill: str) -> list[str]:
     return [v for v in out if not (v in seen or seen.add(v))]
 
 
+STATUS = re.compile(r"작성 (완료|중)|업로드 완료")
+# 제목 자리에 끼어드는 배지들
+BADGES = {"기본 이력서", "기본"}
+
 SKILL_ACTIVATOR = "text=직무 스킬"
 SKILL_INPUT = 'input[placeholder*="보유 스킬"]'
 # 이미 등록된 스킬 칩. 안내 문구가 사라진 뒤 입력칸을 다시 여는 통로다.
@@ -690,3 +694,40 @@ def fill(
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
         }
+
+
+def list_resumes(*, headless: bool = False) -> list[dict[str, str]]:
+    """플랫폼에 저장된 이력서 목록을 읽는다. 읽기만 한다.
+
+    삭제는 이 도구가 하지 않는다 — 계정의 데이터를 지우는 건 되돌릴 수 없고,
+    사람이 판단할 일이다. 무엇이 미리보기용이고 무엇이 안 쓰이는지 보여주는
+    데까지가 여기 몫이다.
+
+    파싱은 파이썬에서 한다. JS 안에서 개행으로 쪼개려면 이스케이프가 파이썬
+    문자열과 JS 문자열을 두 번 거쳐야 해서 조용히 깨진다.
+    """
+    with browser(headless=headless) as s:
+        s.goto(CV_URL)
+        page = s.page()
+        page.wait_for_timeout(5500)
+        body = page.inner_text("body")
+
+    # 목록은 '내 이력서 리스트' 아래에 제목/상태/날짜가 줄 단위로 이어진다.
+    # DOM 구조(li·class)는 해시라 잡히지 않아 본문 텍스트를 읽는다.
+    idx = body.find("내 이력서 리스트")
+    lines = [x.strip() for x in body[idx:].splitlines() if x.strip()] if idx >= 0 else []
+
+    out: list[dict[str, str]] = []
+    for i, line in enumerate(lines):
+        if not STATUS.fullmatch(line):
+            continue
+        # 상태 줄 바로 앞에서 제목을 찾는다. 사이에 '기본 이력서' 배지가 낄 수 있다.
+        # '기본 이력서'는 배지지 제목이 아니다. 건너뛰고 그 앞을 제목으로 본다.
+        title = next(
+            (x for x in reversed(lines[max(0, i - 3):i])
+             if not STATUS.fullmatch(x) and x not in BADGES),
+            "",
+        )
+        date = lines[i + 1] if i + 1 < len(lines) else ""
+        out.append({"title": title, "status": line, "modified": date})
+    return out

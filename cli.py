@@ -76,6 +76,8 @@ def main() -> int:
     cq.add_argument("--limit", type=int, default=1)
     cq.add_argument("--list", action="store_true", help="할 일만 보고 실행하지 않는다")
 
+    sub.add_parser("resumes", help="플랫폼에 저장된 이력서 목록 (읽기 전용)")
+
     sub.add_parser("browser-login", help="로그인용 창을 띄운다 (사람이 직접 로그인)")
 
     cp = sub.add_parser("capture", help="지원 폼 DOM을 떠서 레시피 작성 근거를 만든다")
@@ -181,6 +183,18 @@ def main() -> int:
             conn.close()
         else:
             _out(orchestrator.run(limit=args.limit))
+    elif args.cmd == "resumes":
+        from src.autoapply.db import connect as _c, get_setting
+        from src.autoapply.runner import resume_editor
+
+        conn = _c()
+        preview = get_setting(conn, "preview_resume_url", "")
+        conn.close()
+        _out({
+            "미리보기용": preview or "미지정",
+            "주의": "삭제는 직접 하세요 — 계정 데이터를 지우는 건 되돌릴 수 없습니다",
+            "목록": resume_editor.list_resumes(),
+        })
     elif args.cmd == "browser-login":
         from src.autoapply.runner import login
 
