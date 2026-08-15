@@ -47,6 +47,11 @@ BROWSER_DIR = PROFILE_DIR / "browser"
 # 지원 증적(스크린샷·폼 스냅샷). 원장의 evidence_path가 여기를 가리킨다.
 EVIDENCE_DIR = DATA_DIR / "evidence"
 
+# 이력서 원본(MD SSOT). 어셈블러가 읽는 사실 저장소 — 여기 없는 사실은 만들지 않는다.
+RESUME_SRC_DIR = PROFILE_DIR / "resume"
+# 공고별로 조립된 결과. 지원 원장과 짝을 이뤄 "무엇을 보냈는지"를 남긴다.
+RESUME_OUT_DIR = PROFILE_DIR / "generated"
+
 RESUME_PATH = PROFILE_DIR / "resume.md"
 CREDENTIALS_PATH = PROFILE_DIR / "credentials.json"
 

@@ -42,3 +42,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# 조립된 이력서 — 개인 데이터
+profile/generated/

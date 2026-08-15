@@ -83,6 +83,11 @@ def main() -> int:
         help="덤프 전에 누를 셀렉터 (폼을 여는 용도). 여러 번 지정 가능",
     )
 
+    rp = sub.add_parser("resume", help="공고에 맞춘 이력서 조립 (작성 → 검수 → 재작성)")
+    rp.add_argument("job_id", type=int)
+    rp.add_argument("--rounds", type=int, default=2, help="재작성 포함 최대 라운드 (기본 2)")
+    rp.add_argument("--print", action="store_true", help="본문을 화면에 출력")
+
     apr = sub.add_parser("apply", help="레시피 실행. 기본은 dry-run(제출 안 함)")
     apr.add_argument("job_id", type=int)
     apr.add_argument(
@@ -152,6 +157,14 @@ def main() -> int:
         from src.autoapply.runner import capture
 
         _out(capture(_job(args.job_id), click=args.click))
+    elif args.cmd == "resume":
+        from src.autoapply import assemble
+
+        result = assemble.build(args.job_id, max_rounds=args.rounds)
+        body = result.pop("resume")
+        _out(result)
+        if args.print:
+            print("\n" + body)
     elif args.cmd == "apply":
         _out(_apply(args.job_id, live=args.live, headless=args.headless))
     return 0
