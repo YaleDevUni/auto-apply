@@ -234,12 +234,39 @@ def _cycle_apply(limit: int) -> dict:
     out = []
     for t in targets:
         try:
-            r = _autoapply(t["job_id"], resume_url=None, live=False)
+            r = _autoapply(t["job_id"], resume_url=_preview_resume_url(), live=False)
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
         _report_prepared(t, r)
     return {"prepared": len(out), "items": out}
+
+
+def _preview_resume_url() -> str | None:
+    """미리보기에 재사용할 이력서 URL. 없으면 None(새로 만든다).
+
+    건마다 새 이력서를 만들면 원티드 계정에 쌓인다. 미리보기는 사람이 사진으로
+    보고 판단하는 용도라 하나를 덮어쓰며 재사용해도 된다 — **제출 시점에
+    그 공고용으로 다시 채우기 때문이다**(`autoapply --live`).
+    """
+    from src.autoapply.db import connect as _c, get_setting
+
+    conn = _c()
+    try:
+        return get_setting(conn, "preview_resume_url", "") or None
+    finally:
+        conn.close()
+
+
+def _remember_preview_resume(url: str) -> None:
+    from src.autoapply.db import connect as _c, get_setting, set_setting
+
+    conn = _c()
+    try:
+        if url and not get_setting(conn, "preview_resume_url", ""):
+            set_setting(conn, "preview_resume_url", url)
+    finally:
+        conn.close()
 
 
 def _report_prepared(target: dict, result: dict) -> None:
@@ -265,7 +292,8 @@ def _report_prepared(target: dict, result: dict) -> None:
         shot = apply_res.get("evidence")
         caption = (
             f"📄 <b>지원 준비됨</b>\n{head}\n\n"
-            f"확인 후 제출:\n<code>python cli.py apply {target['job_id']} --live</code>"
+            f"확인 후 제출:\n<code>python cli.py autoapply {target['job_id']} --live</code>\n\n"
+            f"<i>제출 시 이 공고용으로 이력서를 다시 채운 뒤 넣습니다.</i>"
         )
         if not (shot and telegram.send_photo(conn, shot, caption)):
             telegram.notify(conn, caption)
@@ -295,6 +323,7 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
         }
 
     filled = resume_editor.fill(built["data"], resume_url=resume_url, dry_run=False)
+    _remember_preview_resume(filled.get("url", ""))
     if not filled["title"]:
         return {"stopped": "이력서 제목을 읽지 못함 — 어느 이력서를 낼지 정할 수 없다"}
 
