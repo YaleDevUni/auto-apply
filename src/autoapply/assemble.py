@@ -34,7 +34,7 @@ from typing import Any
 
 from . import llm
 from .config import effective_config
-from .db import connect
+from .db import connect, now
 from .paths import RESUME_OUT_DIR, RESUME_SRC_DIR
 
 log = logging.getLogger(__name__)
@@ -336,6 +336,8 @@ def build_editor_json(
         path = RESUME_OUT_DIR / f"{job_id}-{safe}.json"
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    _save_build(job_id, len(required) <= max_gaps, required, gaps, conn)
+
     return {
         "job_id": job_id,
         "company": job["company"],
@@ -404,3 +406,25 @@ def _parse_json(raw: str) -> dict[str, Any]:
     if start == -1 or end == -1:
         raise ValueError(f"JSON을 찾지 못했다: {text[:200]}")
     return json.loads(text[start : end + 1])
+
+
+def _save_build(
+    job_id: int, ok: bool, required: list, gaps: list, conn: sqlite3.Connection | None
+) -> None:
+    """조립 결과를 남긴다. 판정이 다음 실행에서 이걸 읽어 blocker로 쓴다."""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        conn.execute(
+            """INSERT INTO resume_builds (job_id, ok, required_gaps, gaps, built_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(job_id) DO UPDATE SET
+                 ok=excluded.ok, required_gaps=excluded.required_gaps,
+                 gaps=excluded.gaps, built_at=excluded.built_at""",
+            (job_id, 1 if ok else 0, len(required),
+             json.dumps(gaps, ensure_ascii=False), now()),
+        )
+        conn.commit()
+    finally:
+        if own:
+            conn.close()

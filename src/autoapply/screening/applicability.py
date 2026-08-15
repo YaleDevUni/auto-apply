@@ -132,6 +132,8 @@ def evaluate(
     *,
     recipe_dir: Path,
     session_ok: dict[str, bool] | None = None,
+    job_id: int | None = None,
+    gap_counts: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     """공고 하나의 자동지원 가능 여부를 판정한다.
 
@@ -225,27 +227,29 @@ def evaluate(
                    f"{recipe_dir / (job.platform + '.json')}")
         )
 
-    # 5-b) 트랙에 맞는 이력서가 있는가.
+    # 5-b) 이력서는 이제 공고마다 조립해서 등록한다.
     #
-    # 실측(2026-08-15)으로 드러난 구멍: 원티드 계정에 이력서가 15개 있는데
-    # **전부 개발 직군**이다. 레시피가 '첫 번째(기본)'를 고르게 돼 있어서,
-    # 마케팅 공고에 SW 엔지니어 이력서가 나가고 있었다.
-    #
-    # 트랙별 이력서를 이름으로 지정하게 하고, 없으면 막는다. 엉뚱한 이력서를
-    # 보내느니 안 보내는 게 낫다 — 지원은 되돌릴 수 없다.
+    # 예전에는 트랙별로 미리 만들어둔 이력서를 config에서 골랐고, 없으면
+    # RESUME_MISSING으로 막았다. 지금은 `autoapply` 체인이 공고를 읽고 조립해
+    # 편집기에 등록한 뒤 그 제목으로 고르므로 미리 준비해둘 필요가 없다.
+    # 대신 조립이 실패하는 경우(필수요건 근거 부족)를 아래 5-c가 막는다.
     if channel == "platform_form":
-        resume = (ap.get("resumes", {}).get(job.platform, {}) or {}).get(screening.get("track"))
-        if resume:
-            requires["resume"] = resume
-        else:
-            blockers.append(
-                _block(
-                    "RESUME_MISSING",
-                    "이 트랙에 쓸 이력서가 지정되지 않음",
-                    f"트랙 '{screening.get('track')}' — "
-                    f"applicability.resumes.{job.platform} 에 등록 필요",
-                )
-            )
+        requires["resume"] = "공고별 조립"
+
+    # 5-c) 이력서를 실제로 조립해봤더니 필수요건 근거가 없더라 — 되먹임
+    #
+    # 적합도 점수는 공고에 그 키워드가 있는지만 세고 사용자가 실제로 할 수 있는지와
+    # 대조하지 않는다. 실측: 132점 최고점 공고(Java/Spring)가 Java 실무·Oracle·ERP
+    # 전부 근거 없음이었다. 어셈블러가 공고를 읽으며 만든 이 숫자가 그 사각지대를
+    # 메운다. 한 번 조립해본 공고에만 붙으므로, 첫 시도가 알아내고 이후 판정이
+    # 그 공고를 목록에서 뺀다.
+    n_gaps = (gap_counts or {}).get(job_id, 0) if job_id else 0
+    max_gaps = ap.get("max_required_gaps", 2)
+    if n_gaps > max_gaps:
+        blockers.append(
+            _block("REQUIREMENT_GAP", "필수요건 대응 근거 부족",
+                   f"이력서 조립 시 필수 미충족 {n_gaps}건 > 기준 {max_gaps}건")
+        )
 
     # 6) 자소서 문항 — 설정에 따라 blocker이거나 requirement다
     essay_cfg = ap.get("essays", {})

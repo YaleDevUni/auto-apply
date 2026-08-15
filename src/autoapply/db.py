@@ -221,6 +221,21 @@ CREATE TABLE IF NOT EXISTS control_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_control_status ON control_queue(status, id);
 
+-- 이력서 조립 결과. 판정으로 되먹이기 위해 남긴다.
+--
+-- 어셈블러는 공고를 읽으며 "필수요건인데 사실 저장소에 근거가 없는 것"을 센다.
+-- 그 수가 곧 적합도 점수의 사각지대다 — 점수는 공고에 키워드가 있는지만 세고
+-- 실제 수행 가능 여부와 대조하지 않는다(실측: 132점 최고점 공고가 Java/Spring
+-- 실무 근거 없음이었다). 여기 쌓인 값을 applicability가 blocker로 쓴다.
+CREATE TABLE IF NOT EXISTS resume_builds (
+    job_id        INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    ok            INTEGER NOT NULL DEFAULT 0,
+    required_gaps INTEGER NOT NULL DEFAULT 0,
+    gaps          TEXT NOT NULL DEFAULT '[]',
+    resume_title  TEXT,
+    built_at      TEXT NOT NULL
+);
+
 -- 전역 설정. 텔레그램 봇 토큰/채팅 id 등, 코드에 박으면 안 되는 값들.
 CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,

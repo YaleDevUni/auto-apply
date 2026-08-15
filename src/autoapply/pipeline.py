@@ -31,6 +31,17 @@ from .http import Fetcher
 from .paths import RECIPE_DIR
 from .screening import evaluate_applicability, screen
 
+
+def _gap_counts(conn) -> dict[int, int]:
+    """이력서를 조립해본 공고의 필수 미충족 건수. 판정이 blocker로 쓴다."""
+    return {
+        r["job_id"]: r["required_gaps"]
+        for r in conn.execute(
+            "SELECT job_id, required_gaps FROM resume_builds WHERE required_gaps > 0"
+        ).fetchall()
+    }
+
+
 log = logging.getLogger(__name__)
 
 
@@ -44,6 +55,7 @@ def run_platform(
     adapter_cls = REGISTRY[platform]
 
     conn = connect()
+    gaps = _gap_counts(conn)
     run_id = start_run(conn, platform)
     counts = {"found": 0, "inserted": 0, "updated": 0, "excluded": 0, "actionable": 0}
     error: str | None = None
@@ -92,7 +104,8 @@ def run_platform(
                     continue
 
                 appl = evaluate_applicability(
-                    job, final, cfg, recipe_dir=RECIPE_DIR, session_ok=session_ok
+                    job, final, cfg, recipe_dir=RECIPE_DIR, session_ok=session_ok,
+                    job_id=job_id, gap_counts=gaps,
                 )
                 save_applicability(conn, job_id, appl)
                 if appl["actionable"]:
@@ -135,6 +148,7 @@ def reevaluate() -> dict[str, int]:
     load_config.cache_clear()
     cfg = effective_config()
     conn = connect()
+    gaps = _gap_counts(conn)
     rows = conn.execute("SELECT * FROM jobs WHERE closed_at IS NULL").fetchall()
     stats = {"pass": 0, "excluded": 0, "actionable": 0}
 
@@ -160,7 +174,10 @@ def reevaluate() -> dict[str, int]:
         stats[result["verdict"]] += 1
 
         if result["verdict"] == "pass":
-            appl = evaluate_applicability(job, result, cfg, recipe_dir=RECIPE_DIR)
+            appl = evaluate_applicability(
+                job, result, cfg, recipe_dir=RECIPE_DIR,
+                job_id=row["id"], gap_counts=gaps,
+            )
             save_applicability(conn, row["id"], appl)
             if appl["actionable"]:
                 stats["actionable"] += 1
