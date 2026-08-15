@@ -208,6 +208,28 @@ def _set_select(page, placeholder: str, value: str) -> bool:
     return False
 
 
+def _skill_variants(skill: str) -> list[str]:
+    """원티드 스킬 DB가 받아들일 만한 표기 후보를 순서대로 만든다.
+
+    가이드는 사람이 읽는 문서라 `AWS(EC2, S3)`처럼 괄호로 세부를 적는다.
+    원티드는 단일 토큰만 받아 그대로는 등록되지 않는다. 가이드를 플랫폼 표기에
+    맞춰 고치는 건 방향이 거꾸로이므로 여기서 변환한다.
+
+        AWS(EC2, S3)  →  ["AWS(EC2, S3)", "AWS", "EC2", "S3"]
+        Node.js       →  ["Node.js"]
+    """
+    out = [skill]
+    base = re.sub(r"\s*[(（].*", "", skill).strip()
+    if base and base != skill:
+        out.append(base)
+    inner = re.search(r"[(（]([^)）]*)[)）]", skill)
+    if inner:
+        out += [t.strip() for t in re.split(r"[,·/]", inner.group(1)) if t.strip()]
+    # 중복 제거하되 순서는 유지한다 — 앞쪽이 더 정확한 표기다
+    seen: set[str] = set()
+    return [v for v in out if not (v in seen or seen.add(v))]
+
+
 SKILL_ACTIVATOR = "text=직무 스킬"
 SKILL_INPUT = 'input[placeholder*="보유 스킬"]'
 # 이미 등록된 스킬 칩. 안내 문구가 사라진 뒤 입력칸을 다시 여는 통로다.
@@ -254,12 +276,19 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], l
     box.scroll_into_view_if_needed()
 
     for skill in skills[:limit]:
-        box.fill("")
-        box.type(skill, delay=45)
-        page.wait_for_timeout(1600)
-        # 후보는 [role=option]이 아니라 span을 품은 button으로 뜬다.
-        # 정확히 일치하는 것만 고른다 — "React"를 치면 "React Native"도 같이 나온다.
-        opt = page.locator(f'button:has(span:text-is("{skill}"))')
+        chosen = None
+        for variant in _skill_variants(skill):
+            box.fill("")
+            box.type(variant, delay=45)
+            page.wait_for_timeout(1600)
+            # 후보는 [role=option]이 아니라 span을 품은 button으로 뜬다.
+            # 정확히 일치하는 것만 고른다 — "React"를 치면 "React Native"도 같이 나온다.
+            cand = page.locator(f'button:has(span:text-is("{variant}"))')
+            if cand.count():
+                chosen, opt = variant, cand
+                break
+        if chosen is None:
+            opt = page.locator("button:has(span:text-is(\"__없음__\"))")
         if not opt.count():
             # 원티드 스킬 DB에 없는 이름이다. 억지로 넣을 수 없으므로 건너뛰되
             # 무엇이 빠졌는지 보고한다 — 많이 빠지면 가이드의 스킬 표기를
@@ -269,7 +298,7 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], l
             continue
         opt.first.click(force=True)
         page.wait_for_timeout(700)
-        added.append(skill)
+        added.append(chosen)
     return added, skipped
 
 
