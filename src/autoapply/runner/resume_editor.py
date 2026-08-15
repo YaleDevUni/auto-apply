@@ -363,6 +363,50 @@ FIELDS: dict[str, str] = {
 PREFILLED = ("name", "mobile", "email")
 
 
+def finalize(page) -> bool:
+    """'작성 완료'를 눌러 이력서를 제출 가능 상태로 만든다.
+
+    완성도가 100%여도 이걸 안 누르면 상태가 '작성 중'으로 남고, 지원 패널의
+    이력서 목록에서 고를 수 없다. 실측에서 체인이 정확히 여기서 끊겼다 —
+    편집기는 다 채워졌는데 지원 단계에서 이력서 선택이 안 됐다.
+
+    제출(지원)과 다르다. 되돌릴 수 있고, 다시 편집하면 된다.
+    """
+    _dismiss(page)
+    btn = page.locator('button:has-text("작성 완료")')
+    if not btn.count():
+        log.info("'작성 완료' 버튼이 없다 — 이미 완료 상태일 수 있다")
+        return False
+    btn.first.click(force=True)
+    page.wait_for_timeout(3000)
+    return True
+
+
+def read_title(page) -> str:
+    """편집기 상단의 이력서 제목을 읽는다.
+
+    지원 레시피가 이 제목으로 이력서를 고르므로(`li:has(span:text-is(...))`),
+    조립 → 등록 → 지원을 잇는 고리가 여기다. 제목을 못 읽으면 어느 이력서를
+    낼지 정할 수 없으므로 빈 문자열을 돌려주고 호출부가 멈추게 한다.
+    """
+    return page.evaluate(
+        """() => {
+            const anchor = [...document.querySelectorAll('*')]
+                .find(e => e.children.length === 0 && (e.innerText||'').trim() === '기본 이력서 설정');
+            if (!anchor) return '';
+            let row = anchor.closest('div');
+            for (let i = 0; i < 4 && row; i++) {
+                const btn = [...row.querySelectorAll('button')]
+                    .map(b => (b.innerText||'').trim())
+                    .filter(t => t && t !== '기본 이력서 설정');
+                if (btn.length) return btn[0];
+                row = row.parentElement;
+            }
+            return '';
+        }"""
+    ).strip()
+
+
 def open_editor(s: PlaywrightSession, *, resume_url: str | None = None) -> str:
     """편집기를 연다. resume_url을 주면 그 이력서를, 아니면 새로 만든다.
 
@@ -411,9 +455,11 @@ def fill(
             if not exists:
                 missing.append(key)
 
+        title = read_title(p)
+
         if dry_run:
             return {
-                "url": url, "dry_run": True,
+                "url": url, "title": title, "dry_run": True,
                 "found": found, "missing": missing,
                 "note": "입력하지 않음. 셀렉터 확인만 했다.",
             }
@@ -506,11 +552,15 @@ def fill(
         }
         lost = [k for k, ok in persisted.items() if not ok]
 
+        # 검증 뒤에 '작성 완료'를 누른다. 누르면 편집 화면을 벗어나 입력칸이
+        # 사라지므로, 먼저 누르면 위의 대조를 할 수 없다.
+        finalized = finalize(p)
+
         return {
-            "url": url, "dry_run": False,
+            "url": url, "title": title, "dry_run": False,
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
-            "dates": dates, "selects": selects, "skills": skills, "links": links,
+            "dates": dates, "selects": selects, "finalized": finalized, "skills": skills, "links": links,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
         }

@@ -93,6 +93,14 @@ def main() -> int:
     rp.add_argument("--rounds", type=int, default=2, help="재작성 포함 최대 라운드 (기본 2)")
     rp.add_argument("--print", action="store_true", help="본문을 화면에 출력")
 
+    ap2 = sub.add_parser(
+        "autoapply", help="조립 → 이력서 등록 → 지원까지 한 번에. 기본은 dry-run")
+    ap2.add_argument("job_id", type=int)
+    ap2.add_argument("--resume-url", help="기존 이력서를 재사용한다 (없으면 새로 만든다)")
+    ap2.add_argument(
+        "--live", action="store_true",
+        help="실제로 제출한다. 되돌릴 수 없다 — dry-run 스크린샷을 먼저 확인할 것")
+
     apr = sub.add_parser("apply", help="레시피 실행. 기본은 dry-run(제출 안 함)")
     apr.add_argument("job_id", type=int)
     apr.add_argument(
@@ -185,12 +193,49 @@ def main() -> int:
         _out(result)
         if args.print:
             print("\n" + body)
+    elif args.cmd == "autoapply":
+        _out(_autoapply(args.job_id, resume_url=args.resume_url, live=args.live))
     elif args.cmd == "apply":
         _out(_apply(args.job_id, live=args.live, headless=args.headless))
     return 0
 
 
-def _job(job_id: int) -> dict:
+def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
+    """조립 → 등록 → 지원. 각 단계가 다음 단계의 입력을 만든다.
+
+    이력서 제목이 고리다. 편집기에 채운 뒤 그 제목을 읽어 지원 레시피에 넘기므로,
+    `config.applicability.resumes` 매핑이 더는 필요 없다 — 트랙별로 미리 만들어둔
+    이력서를 고르는 게 아니라 공고마다 만들기 때문이다.
+
+    조립이 `ok=False`(필수요건 근거 없음/검수 반려)면 여기서 멈춘다. 맞지 않는
+    자리에 이름을 남기는 것보다 안 내는 게 낫다.
+    """
+    from src.autoapply import assemble
+    from src.autoapply.runner import resume_editor
+
+    built = assemble.build_editor_json(job_id)
+    if not built["ok"]:
+        return {
+            "stopped": "이력서 조립 단계에서 중단",
+            "이유": f"필수요건 미충족 {built['required_gaps']}건",
+            "gaps": [g["text"][:70] for g in built["gaps"] if g.get("level") == "필수"],
+        }
+
+    filled = resume_editor.fill(built["data"], resume_url=resume_url, dry_run=False)
+    if not filled["title"]:
+        return {"stopped": "이력서 제목을 읽지 못함 — 어느 이력서를 낼지 정할 수 없다"}
+
+    job = _job(job_id, resume_title=filled["title"])
+    result = _apply_with(job, live=live)
+    return {
+        "company": built["company"],
+        "resume": {"title": filled["title"], "url": filled["url"],
+                   "lost": filled.get("lost"), "skills": len(filled.get("skills", []))},
+        "apply": result,
+    }
+
+
+def _job(job_id: int, *, resume_title: str | None = None) -> dict:
     """레시피가 쓸 공고 정보. 트랙에 맞는 이력서 제목까지 붙여서 돌려준다."""
     from src.autoapply.config import effective_config
 
@@ -208,8 +253,10 @@ def _job(job_id: int) -> dict:
     finally:
         conn.close()
 
+    # 방금 만든 이력서 제목이 있으면 그걸 쓴다. 없을 때만 config 매핑으로 넘어간다
+    # (이력서를 미리 만들어두고 트랙별로 고르던 예전 방식).
     resumes = effective_config().get("applicability", {}).get("resumes", {})
-    job["resume"] = (resumes.get(job["platform"], {}) or {}).get(job["track"])
+    job["resume"] = resume_title or (resumes.get(job["platform"], {}) or {}).get(job["track"])
     if not job["resume"]:
         # 여기서 멈추는 게 낫다. 이력서를 못 정한 채 진행하면 레시피가
         # 자리표시자를 못 채우거나, 더 나쁘게는 엉뚱한 이력서를 고른다.
@@ -227,9 +274,14 @@ def _apply(job_id: int, *, live: bool, headless: bool) -> dict:
 
     live일 때만 선점한다 — 그리고 선점이 실패하면(중복이거나 상한) 실행하지 않는다.
     """
+    return _apply_with(_job(job_id), live=live, headless=headless)
+
+
+def _apply_with(job: dict, *, live: bool, headless: bool = False) -> dict:
+    """공고 정보가 이미 준비된 경우의 지원 실행. autoapply 체인이 이걸 쓴다."""
     from src.autoapply.runner import LoginRequired, run
 
-    job = _job(job_id)
+    job_id = job["job_id"]
     if not live:
         return run(job, live=False, headless=headless)
 
