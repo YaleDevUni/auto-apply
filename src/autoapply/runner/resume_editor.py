@@ -58,8 +58,21 @@ def _set_autocomplete(page, selector: str, value: str) -> None:
     loc = page.locator(selector).first
     loc.click()
     loc.fill("")
-    loc.type(value, delay=55)
-    page.wait_for_timeout(2200)
+
+    # 한 글자씩 치면 드롭다운이 다시 그려지는 사이 입력이 씹힌다
+    # (실측: "Good Things Consignment" → "...Consignmet", 재시도하면 또 다르게 잘림).
+    # 값을 한 번에 넣고 input 이벤트만 따로 쏜다 — React가 값을 읽는 경로는
+    # 네이티브 setter라 이 방식이 아니면 상태가 갱신되지 않는다.
+    loc.evaluate(
+        """(el, v) => {
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value').set;
+            setter.call(el, v);
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+        }""",
+        value,
+    )
+    page.wait_for_timeout(2400)
 
     # 목록에 정확히 일치하는 후보가 있으면 그것을, 없으면 '직접 입력하기'를 고른다.
     exact = page.locator(f'[role=option]:has-text("{value}")')
