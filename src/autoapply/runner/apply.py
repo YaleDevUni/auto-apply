@@ -159,6 +159,40 @@ def _run_with(
     return result
 
 
+def _click(s: PlaywrightSession, sel: str, *, optional: bool, submit: bool) -> None:
+    """오버레이를 걷어내고 누른다. 필요하면 force로.
+
+    실측(2026-08-16 06시 사이클): `지원하기`가 DOM에 있는데 클릭이 15초 타임아웃으로
+    죽어 사이클이 통째로 실패했다. 원티드는 팝업 뒤에 투명 백드롭
+    (role=presentation)을 깔고, 그게 남아 있으면 클릭이 거기 먹힌다.
+
+    submit은 force를 쓰지 않는다. 되돌릴 수 없는 동작이라, 정말 눌리는 상태에서만
+    눌러야 한다 — 가려진 버튼을 강제로 누르면 무엇을 눌렀는지 알 수 없다.
+    """
+    page = s.page()
+    for _ in range(3):
+        if not page.locator('[role="presentation"]').count():
+            break
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+
+    try:
+        s.click(sel)
+        return
+    except Exception as e:  # noqa: BLE001
+        if submit:
+            raise
+        log.info("일반 클릭 실패 (%s) — force로 재시도: %s", sel, type(e).__name__)
+
+    try:
+        page.locator(sel).first.click(force=True)
+    except Exception as e:  # noqa: BLE001
+        if optional:
+            log.info("선택 스텝 클릭 실패 — 건너뜀: %s", sel)
+            return
+        raise RecipeError(f"클릭 실패: {sel} ({type(e).__name__})") from e
+
+
 def _step(s: PlaywrightSession, step: dict[str, Any], job: dict[str, Any]) -> None:
     act = step["do"]
     # 셀렉터에도 치환을 건다. 어느 이력서를 고를지가 공고마다 다르므로
@@ -177,7 +211,7 @@ def _step(s: PlaywrightSession, step: dict[str, Any], job: dict[str, Any]) -> No
         raise RecipeError(f"요소를 찾지 못함: {sel}  —  화면이 바뀌었을 수 있다")
 
     if act == "click" or act == "submit":
-        s.click(sel)
+        _click(s, sel, optional=optional, submit=(act == "submit"))
     elif act == "check":
         s.check(sel)
     elif act == "fill":
