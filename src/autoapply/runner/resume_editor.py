@@ -236,6 +236,44 @@ SKILL_INPUT = 'input[placeholder*="보유 스킬"]'
 SKILL_CHIP = '[class*="Skill"] button, [class*="skill"] button'
 
 
+ACH_ADD = 'button:has-text("주요 성과 추가")'
+ACH_DETAIL = 'textarea[placeholder^="업무 경험을 성과"]'
+ACH_TITLE = 'input[name="title"]'
+
+
+def _fill_achievements(page, achievements: list[dict], limit: int = 4) -> int:
+    """주요 성과를 여러 건 채운다. 반환은 실제로 채운 건수.
+
+    성과 칸은 '주요 성과 추가'로 하나씩 만든다. 만들기만 하고 못 채우면 빈 칸이
+    남아 이력서가 지저분해지므로, 채울 내용이 있는 만큼만 만든다.
+
+    개수의 근거는 detail textarea다. `input[name="title"]`은 어학 '시험명'도
+    같은 name을 쓰기 때문에 그것만으로는 성과 칸을 셀 수 없다 — 잘못 세면
+    시험명 칸에 프로젝트 제목이 들어간다.
+    """
+    items = [a for a in achievements if a.get("title")][:limit]
+    if not items:
+        return 0
+
+    for _ in range(len(items) - page.locator(ACH_DETAIL).count()):
+        add = page.locator(ACH_ADD)
+        if not add.count():
+            log.info("'주요 성과 추가' 버튼이 없다 — 있는 칸까지만 채운다")
+            break
+        _dismiss(page)
+        add.first.click(force=True)
+        page.wait_for_timeout(1400)
+
+    slots = page.locator(ACH_DETAIL).count()
+    filled = 0
+    for i, ach in enumerate(items[:slots]):
+        _set(page, f"{ACH_TITLE} >> nth={i}", str(ach["title"]))
+        if ach.get("detail"):
+            _set(page, f"{ACH_DETAIL} >> nth={i}", str(ach["detail"]))
+        filled += 1
+    return filled
+
+
 def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], list[str]]:
     """스킬 칸을 채운다. 원티드 스킬 DB에 있는 것만 등록된다.
 
@@ -364,11 +402,23 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
 
 # YYYY.MM 버튼의 화면상 순서. 편집기 레이아웃이 고정이라 순번으로 잡는다.
 # (섹션 제목이 h2/h3가 아니어서 DOM으로 소속을 찾을 수 없다)
-DATE_SLOTS = {
-    "exp_start": 0, "exp_end": 1,
-    "ach_start": 2, "ach_end": 3,      # 주요 성과 기간
-    "edu_start": 4, "edu_end": 5,
-}
+def _date_slots(n_achievements: int) -> dict[str, int]:
+    """날짜 버튼 순서. 성과가 늘면 뒤가 밀린다.
+
+        0,1              경력 재직기간
+        2..2+2n-1        성과 기간 (성과 1건당 2개)
+        그 다음 2개       학력 재학기간
+
+    성과를 여러 건 채운 뒤 학력 슬롯을 고정 인덱스(4,5)로 잡으면 두 번째 성과
+    기간 칸에 졸업일이 들어간다.
+    """
+    n = max(n_achievements, 1)
+    base = 2 + 2 * n
+    slots = {"exp_start": 0, "exp_end": 1, "edu_start": base, "edu_end": base + 1}
+    for i in range(n):
+        slots[f"ach{i}_start"] = 2 + 2 * i
+        slots[f"ach{i}_end"] = 3 + 2 * i
+    return slots
 
 
 # 자동완성이 붙은 필드. 일반 입력으로는 확정되지 않는다.
@@ -521,13 +571,9 @@ def fill(
                     setter(p, FIELDS[key], str(e[src]))
                     filled[key] = str(e[src])[:40]
 
-            ach = (e.get("achievements") or [{}])[0]
-            if ach.get("title") and found.get("exp_achievement_title"):
-                _set(p, FIELDS["exp_achievement_title"], str(ach["title"]))
-                filled["exp_achievement_title"] = str(ach["title"])[:40]
-            if ach.get("detail") and found.get("exp_achievement_detail"):
-                _set(p, FIELDS["exp_achievement_detail"], str(ach["detail"]))
-                filled["exp_achievement_detail"] = str(ach["detail"])[:40]
+            n_ach = _fill_achievements(p, e.get("achievements") or [])
+            if n_ach:
+                filled["achievements"] = f"{n_ach}건"
 
         # 학력 — 같은 원칙
         edus = data.get("educations") or []
@@ -546,25 +592,29 @@ def fill(
         # 날짜 — 버튼+피커라 입력 필드와 처리가 다르다. 뒤에 몰아서 한다
         # (피커가 열려 있으면 다른 필드 클릭이 가려진다).
         dates: dict[str, bool] = {}
-        if "dates" in steps and exps:
-            e0 = exps[0]
-            if e0.get("start"):
-                dates["exp_start"] = _set_date(p, DATE_SLOTS["exp_start"], e0["start"])
-            if e0.get("end"):
-                dates["exp_end"] = _set_date(p, DATE_SLOTS["exp_end"], e0["end"])
-            ach0 = (e0.get("achievements") or [{}])[0]
-            if ach0.get("start"):
-                dates["ach_start"] = _set_date(p, DATE_SLOTS["ach_start"], ach0["start"])
-            if ach0.get("end"):
-                dates["ach_end"] = _set_date(p, DATE_SLOTS["ach_end"], ach0["end"])
-        if "dates" in steps and edus:
-            d0 = edus[0]
-            if d0.get("start"):
-                dates["edu_start"] = _set_date(p, DATE_SLOTS["edu_start"], d0["start"])
-            if d0.get("end"):
-                dates["edu_end"] = _set_date(p, DATE_SLOTS["edu_end"], d0["end"])
+        if "dates" in steps:
+            achs = [a for a in ((exps[0].get("achievements") if exps else []) or [])
+                    if a.get("title")][:4]
+            slots = _date_slots(len(achs))
+            if exps:
+                e0 = exps[0]
+                if e0.get("start"):
+                    dates["exp_start"] = _set_date(p, slots["exp_start"], e0["start"])
+                if e0.get("end"):
+                    dates["exp_end"] = _set_date(p, slots["exp_end"], e0["end"])
+                for i, a in enumerate(achs):
+                    if a.get("start"):
+                        dates[f"ach{i}_start"] = _set_date(p, slots[f"ach{i}_start"], a["start"])
+                    if a.get("end"):
+                        dates[f"ach{i}_end"] = _set_date(p, slots[f"ach{i}_end"], a["end"])
+            if edus:
+                d0 = edus[0]
+                if d0.get("start"):
+                    dates["edu_start"] = _set_date(p, slots["edu_start"], d0["start"])
+                if d0.get("end"):
+                    dates["edu_end"] = _set_date(p, slots["edu_end"], d0["end"])
 
-        # 필수 셀렉트. 이게 비면 완성도가 안 올라가고 지원 시 반려될 수 있다.
+        # 필수 셀렉트. 비면 완성도가 안 올라가고 지원 시 반려될 수 있다.
         selects: dict[str, bool] = {}
         if "selects" in steps and exps:
             selects["재직 형태"] = _set_select(p, "재직 형태", "정규직")
@@ -584,7 +634,7 @@ def fill(
         persisted = {
             k: bool(p.locator(FIELDS[k]).first.input_value().strip())
             for k in filled
-            if found.get(k)
+            if found.get(k) and k in FIELDS
         }
         lost = [k for k, ok in persisted.items() if not ok]
 
