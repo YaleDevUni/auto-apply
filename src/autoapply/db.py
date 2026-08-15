@@ -196,6 +196,14 @@ CREATE TABLE IF NOT EXISTS platform_resumes (
 );
 CREATE INDEX IF NOT EXISTS idx_resumes_track ON platform_resumes(platform, track);
 
+-- 파이프라인 건강 스냅샷. 이상 감지는 '지금 이상한가'가 아니라 '어제와 다른가'로
+-- 판정하는 항목이 있어서(수집 급감, actionable 붕괴) 직전 값을 남겨둬야 한다.
+CREATE TABLE IF NOT EXISTS health_snapshots (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    metrics  TEXT NOT NULL              -- JSON: jobs/passed/actionable/blockers/...
+);
+
 -- 전역 설정. 텔레그램 봇 토큰/채팅 id 등, 코드에 박으면 안 되는 값들.
 CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,

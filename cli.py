@@ -59,6 +59,10 @@ def main() -> int:
 
     sub.add_parser("blocked", help="막힌 이유 집계")
     sub.add_parser("quota", help="오늘 남은 지원 가능 건수")
+
+    hp = sub.add_parser("health", help="파이프라인 이상 감지 (LLM 0회)")
+    hp.add_argument("--no-notify", action="store_true", help="텔레그램 알림 없이 확인만")
+    hp.add_argument("--history", action="store_true", help="최근 스냅샷 추이")
     sub.add_parser("status", help="상태 요약")
     sub.add_parser("where", help="경로 확인")
 
@@ -105,6 +109,12 @@ def main() -> int:
             session_ok[k.strip()] = v.strip() not in ("0", "false", "no", "")
         _out(pipeline.run_all(args.platform, session_ok or None))
         agent.notify_login_required()  # 세션 끊긴 플랫폼이 있으면 알린다 (쿨다운 적용)
+
+        from src.autoapply import health
+
+        result = health.run()  # 조용히 망가진 게 있으면 알린다
+        for f in result.get("findings", []):
+            print(f"⚠️  {f['message']}", file=sys.stderr)
     elif args.cmd == "reevaluate":
         _out(pipeline.reevaluate())
     elif args.cmd == "targets":
@@ -113,6 +123,10 @@ def main() -> int:
         _out(agent.blocked_summary())
     elif args.cmd == "quota":
         _out(agent.quota())
+    elif args.cmd == "health":
+        from src.autoapply import health
+
+        _out(health.history() if args.history else health.run(notify=not args.no_notify))
     elif args.cmd == "status":
         _out(agent.status())
     elif args.cmd == "where":
