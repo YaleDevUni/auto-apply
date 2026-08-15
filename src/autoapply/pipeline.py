@@ -114,7 +114,13 @@ def run_all(
     session_ok: dict[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     cfg = effective_config()
-    targets = platforms or list(REGISTRY)
+    # --platform으로 명시하면 그게 이긴다. 아니면 config의 enabled 목록을 따른다.
+    # 어댑터가 있다고 다 수집하지 않는다 — 레시피가 없는 플랫폼을 수집하면
+    # 지원도 못 하면서 판정 통계만 오염시킨다(NO_RECIPE가 통과분을 지배).
+    targets = platforms or cfg.get("scrape", {}).get("platforms") or list(REGISTRY)
+    unknown = [p for p in targets if p not in REGISTRY]
+    if unknown:
+        raise ValueError(f"모르는 플랫폼: {unknown}")
     return [run_platform(p, cfg, session_ok) for p in targets]
 
 
