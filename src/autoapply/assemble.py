@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
@@ -251,3 +252,97 @@ def build(
         "path": str(path) if path else None,
         "resume": body,
     }
+
+
+# ─────────────────── 원티드 편집기용 구조화 출력 ───────────────────
+#
+# 원티드 이력서 편집기는 필드가 나뉜 폼이다(이름/연락처/간단소개/경력/학력/
+# AI 활용/스킬/링크). 마크다운 한 덩어리로는 채울 수 없다.
+#
+# 마크다운을 파싱해 쪼개지 않고 처음부터 JSON으로 받는 이유: 파싱은 문장 형태가
+# 조금만 바뀌어도 깨지는데, 그 깨짐이 조용하다. 잘못 쪼개진 채로 폼에 들어가면
+# 회사명 칸에 직무가 들어간 이력서가 제출된다.
+
+EDITOR_SCHEMA = """{
+  "headline": "한 줄 타이틀 (공고에 맞춰 매번 다시 씀)",
+  "summary": "간단 소개. 400자 이상 600자 이내. 채용 담당자가 가장 먼저 읽는 글",
+  "experiences": [
+    {"company": "회사명", "job_role": "직무", "business_title": "직책",
+     "start": "YYYY.MM", "end": "YYYY.MM",
+     "achievements": [
+       {"title": "주요 성과 제목", "detail": "· 로 시작하는 불릿 2~4개. 마지막 줄은 '· 사용기술: A, B, C'"}
+     ]}
+  ],
+  "educations": [
+    {"school": "학교명", "major": "전공 및 학위", "start": "YYYY.MM", "end": "YYYY.MM",
+     "detail": "이수 과목 또는 연구 내용"}
+  ],
+  "ai_usage": "AI 활용 경험. 가이드 §6-1을 기준으로 쓰되 이 공고에 맞춰 조정",
+  "skills": ["스킬", "나열"],
+  "links": [{"name": "GitHub", "url": "https://..."}],
+  "gaps": [{"level": "필수|우대", "text": "공고 요건 중 근거가 없는 항목"}]
+}"""
+
+
+def build_editor_json(
+    job_id: int, *, conn: sqlite3.Connection | None = None, save: bool = True
+) -> dict[str, Any]:
+    """원티드 편집기 폼에 그대로 넣을 수 있는 형태로 조립한다."""
+    guide = load_guide()
+    job = load_job(job_id, conn)
+
+    prompt = f"""아래 [작성 가이드]를 따라 [채용공고]에 맞춘 이력서를 **JSON으로만** 출력하라.
+
+가이드의 §1 처리 순서, §3 사실 저장소, §4 문장 규칙, §5 일관성 체크리스트,
+§6-1 AI 활용, §7 직무별 강조 우선순위를 적용한다.
+
+절대 규칙:
+- §3 사실 저장소에 없는 수치·기술·프로젝트를 만들지 않는다.
+- 공고가 요구하는데 근거가 없는 항목은 `gaps`에 넣는다. 지어내지 않는다.
+- JSON 외에 어떤 설명도 출력하지 않는다. 코드펜스도 붙이지 않는다.
+
+스키마:
+{EDITOR_SCHEMA}
+
+# 작성 가이드
+{guide}
+
+# 채용공고
+{_jd_block(job)}"""
+
+    raw = llm.ask(prompt)
+    data = _parse_json(raw)
+
+    gaps = data.get("gaps") or []
+    required = [g for g in gaps if g.get("level") == "필수"]
+    max_gaps = effective_config().get("applicability", {}).get("max_required_gaps", 2)
+
+    path = None
+    if save:
+        RESUME_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^\w가-힣]+", "_", job["company"])[:24]
+        path = RESUME_OUT_DIR / f"{job_id}-{safe}.json"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "job_id": job_id,
+        "company": job["company"],
+        "title": job["title"],
+        "ok": len(required) <= max_gaps,
+        "required_gaps": len(required),
+        "gaps": gaps,
+        "path": str(path) if path else None,
+        "data": data,
+    }
+
+
+def _parse_json(raw: str) -> dict[str, Any]:
+    """코드펜스가 붙어 오는 경우가 있어 한 번 벗겨본다. 그 이상은 고치지 않는다 —
+    형식을 못 지킨 응답을 억지로 살리면 무엇이 잘못됐는지 안 보이게 된다."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-z]*\n|\n```$", "", text).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"JSON을 찾지 못했다: {text[:200]}")
+    return json.loads(text[start : end + 1])
