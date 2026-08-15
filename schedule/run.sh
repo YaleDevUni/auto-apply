@@ -32,8 +32,13 @@ else
 fi
 
 # ── 대기열 상위 1건을 dry-run으로 준비. 제출은 하지 않는다.
-echo "--- A2: 지원 준비 (dry-run) ---"
-"$PY" cli.py cycle-apply --limit 1 || echo "cycle-apply 실패 (다음 사이클이 이어받는다)"
+#
+# 수집 시각에만 돌린다. 건당 원티드에 이력서가 하나 생기므로 2시간마다 돌리면
+# 하루 12개가 쌓인다. 하루 3건이면 검토할 양으로도 적당하다.
+if [[ "$HOUR" == "3" || "$HOUR" == "9" || "$HOUR" == "15" ]]; then
+  echo "--- A2: 지원 준비 (dry-run) ---"
+  "$PY" cli.py cycle-apply --limit 1 || echo "cycle-apply 실패 (다음 사이클이 이어받는다)"
+fi
 
 # ── B: 개선 오케스트레이터. 한 사이클에 1건만 — 브랜치가 쌓이면 검토가 불가능해진다.
 echo "--- B: 자기개선 ---"

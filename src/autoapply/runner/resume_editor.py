@@ -101,17 +101,19 @@ def _set_autocomplete(page, selector: str, value: str) -> None:
 
 
 def _dismiss(page) -> None:
-    """열려 있는 드롭다운·피커를 닫는다.
+    """열려 있는 드롭다운·피커를 닫고 포커스를 뺀다.
 
-    원티드 편집기는 열린 팝업 뒤에 투명 백드롭(role=presentation)을 깐다.
-    그게 남아 있으면 다음 필드 클릭이 백드롭에 먹혀 계속 재시도만 하다 죽는다.
-    각 상호작용 전에 한 번 걷어낸다.
+    처음엔 `[role=presentation]` 개수로 백드롭이 남았는지 판단했는데 틀렸다 —
+    스킬 칩이 전부 role=presentation이라 스킬을 채우고 나면 73개가 잡힌다.
+    개수는 신호가 아니다. 그냥 Escape를 누르고 포커스를 빼는 게 맞다.
+
+    포커스까지 빼는 이유: 스킬 입력칸이 열린 채로 남으면 그 팝업이 다음 섹션
+    (링크) 클릭을 가로챈다. 실제로 그래서 링크가 계속 안 열렸다.
     """
-    for _ in range(3):
-        if not page.locator('[role="presentation"]').count():
-            return
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(400)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    page.evaluate("() => document.activeElement && document.activeElement.blur()")
+    page.wait_for_timeout(300)
 
 
 def _flush(page, field: str, value: Any) -> None:
@@ -376,6 +378,24 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
     added: list[str] = []
     if not links:
         return added
+
+    # 직전 스킬 입력이 열린 채로 남으면 그 팝업이 링크 행 클릭을 가로챈다.
+    # 06시 사이클에서 "링크 입력칸이 열리지 않았다"가 난 이유다.
+    #
+    # Escape도 blur도 그 팝업을 못 닫는다. **다른 섹션 제목을 실제로 클릭**해야
+    # 닫힌다 — 원티드 편집기는 "다른 곳을 눌렀다"를 포커스가 아니라 클릭으로 본다.
+    _dismiss(page)
+    for neutral in ("text=간단 소개", "text=학력", "text=경력"):
+        loc = page.locator(neutral).first
+        if loc.count():
+            try:
+                # 짧게 건다. 이 클릭은 팝업을 닫으려는 부수 동작이라
+                # 여기서 15초(기본값)를 잡아먹으면 사이클 전체가 느려진다.
+                loc.click(force=True, timeout=3000)
+                page.wait_for_timeout(900)
+                break
+            except Exception:  # noqa: BLE001
+                continue
 
     if not page.locator(LINK_NAME).count():
         act = page.locator(LINK_ACTIVATOR).last
