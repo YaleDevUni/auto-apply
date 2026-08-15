@@ -288,9 +288,23 @@ EDITOR_SCHEMA = """{
 
 
 def build_editor_json(
-    job_id: int, *, conn: sqlite3.Connection | None = None, save: bool = True
+    job_id: int,
+    *,
+    conn: sqlite3.Connection | None = None,
+    save: bool = True,
+    max_age_hours: float = 72,
 ) -> dict[str, Any]:
-    """원티드 편집기 폼에 그대로 넣을 수 있는 형태로 조립한다."""
+    """원티드 편집기 폼에 그대로 넣을 수 있는 형태로 조립한다.
+
+    max_age_hours 안에 만든 결과가 있으면 재사용한다. 사이클이 반복될 때마다
+    같은 공고에 LLM을 다시 부르면 시간(건당 40초)과 비용이 그대로 곱해진다.
+    공고 본문과 이력서 가이드는 하루 사이에 잘 바뀌지 않는다.
+    """
+    cached = _load_cached(job_id, max_age_hours, conn)
+    if cached is not None:
+        log.info("공고 %s — 최근 조립 결과 재사용 (LLM 호출 0회)", job_id)
+        return cached
+
     guide = load_guide()
     job = load_job(job_id, conn)
 
@@ -425,6 +439,52 @@ def _save_build(
              json.dumps(gaps, ensure_ascii=False), now()),
         )
         conn.commit()
+    finally:
+        if own:
+            conn.close()
+
+
+def _load_cached(
+    job_id: int, max_age_hours: float, conn: sqlite3.Connection | None
+) -> dict[str, Any] | None:
+    """최근 조립 결과가 있으면 그대로 돌려준다. 없으면 None."""
+    from datetime import datetime, timezone
+
+    own = conn is None
+    conn = conn or connect()
+    try:
+        row = conn.execute(
+            "SELECT ok, required_gaps, gaps, built_at FROM resume_builds WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        # built_at은 보통 오프셋을 갖지만, 손으로 넣은 행에는 없을 수 있다.
+        # 없는 값을 UTC로 가정하면 최대 9시간 오차가 나므로 로컬로 본다.
+        stamp = datetime.fromisoformat(row["built_at"])
+        if stamp.tzinfo is None:
+            stamp = stamp.astimezone()
+        age = (datetime.now(timezone.utc) - stamp).total_seconds() / 3600
+        if age > max_age_hours:
+            return None
+
+        job = load_job(job_id, conn)
+        safe = re.sub(r"[^\w가-힣]+", "_", job["company"])[:24]
+        path = RESUME_OUT_DIR / f"{job_id}-{safe}.json"
+        if not path.exists():
+            return None
+
+        return {
+            "job_id": job_id,
+            "company": job["company"],
+            "title": job["title"],
+            "ok": bool(row["ok"]),
+            "required_gaps": row["required_gaps"],
+            "gaps": json.loads(row["gaps"] or "[]"),
+            "path": str(path),
+            "cached": True,
+            "data": json.loads(path.read_text(encoding="utf-8")),
+        }
     finally:
         if own:
             conn.close()

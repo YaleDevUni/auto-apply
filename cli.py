@@ -101,6 +101,10 @@ def main() -> int:
         "--live", action="store_true",
         help="실제로 제출한다. 되돌릴 수 없다 — dry-run 스크린샷을 먼저 확인할 것")
 
+    cyc = sub.add_parser(
+        "cycle-apply", help="대기열 상위 N건을 dry-run으로 준비한다 (제출 안 함)")
+    cyc.add_argument("--limit", type=int, default=1)
+
     apr = sub.add_parser("apply", help="레시피 실행. 기본은 dry-run(제출 안 함)")
     apr.add_argument("job_id", type=int)
     apr.add_argument(
@@ -195,9 +199,46 @@ def main() -> int:
             print("\n" + body)
     elif args.cmd == "autoapply":
         _out(_autoapply(args.job_id, resume_url=args.resume_url, live=args.live))
+    elif args.cmd == "cycle-apply":
+        _out(_cycle_apply(args.limit))
     elif args.cmd == "apply":
         _out(_apply(args.job_id, live=args.live, headless=args.headless))
     return 0
+
+
+def _cycle_apply(limit: int) -> dict:
+    """대기열 상위 N건을 dry-run으로 준비한다.
+
+    **cron에서는 절대 제출하지 않는다.** 이력서를 조립해 등록하고 지원 폼까지
+    채운 뒤 스크린샷만 남긴다. 사람이 그 사진을 보고 `apply <id> --live` 로
+    제출한다 — 되돌릴 수 없는 행동에 사람의 확인을 남겨두는 지점이다.
+
+    한 사이클에 기본 1건인 이유: 건당 브라우저를 띄우고 이력서를 조립하므로
+    2분 안팎이 든다. 여러 건을 몰아 돌리면 사이클이 길어지고, 무엇보다
+    사람이 검토할 스크린샷이 한 번에 쌓여 실질 검토가 안 된다.
+    """
+    from src.autoapply.db import connect as _connect
+    from src.autoapply.notify.listener import is_paused
+
+    conn = _connect()
+    try:
+        if is_paused(conn):
+            return {"skipped": "일시정지 상태 (텔레그램 /resume 으로 해제)"}
+        targets = agent.next_targets(limit, conn)
+    finally:
+        conn.close()
+
+    if not targets:
+        return {"prepared": 0, "reason": "대기열 비어 있음"}
+
+    out = []
+    for t in targets:
+        try:
+            r = _autoapply(t["job_id"], resume_url=None, live=False)
+        except Exception as e:  # noqa: BLE001
+            r = {"error": f"{type(e).__name__}: {e}"}
+        out.append({"job_id": t["job_id"], "company": t["company"], **r})
+    return {"prepared": len(out), "items": out}
 
 
 def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:

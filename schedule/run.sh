@@ -31,6 +31,10 @@ else
   echo "--- A: 건너뜀 (수집 시각 아님) ---"
 fi
 
+# ── 대기열 상위 1건을 dry-run으로 준비. 제출은 하지 않는다.
+echo "--- A2: 지원 준비 (dry-run) ---"
+"$PY" cli.py cycle-apply --limit 1 || echo "cycle-apply 실패 (다음 사이클이 이어받는다)"
+
 # ── B: 개선 오케스트레이터. 한 사이클에 1건만 — 브랜치가 쌓이면 검토가 불가능해진다.
 echo "--- B: 자기개선 ---"
 "$PY" cli.py improve --limit 1 || echo "improve 실패 (다음 사이클이 이어받는다)"
