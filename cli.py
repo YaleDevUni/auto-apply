@@ -70,6 +70,11 @@ def main() -> int:
     tsp.add_argument("token", help="@BotFather에게 받은 봇 토큰")
 
     sub.add_parser("notify-login", help="세션 끊김 알림 수동 트리거 (쿨다운 무시하지 않음)")
+    sub.add_parser("listen", help="폰에서 온 메시지 처리 (운영 명령 + 개발 지시 접수)")
+
+    cq = sub.add_parser("improve", help="자기개선 오케스트레이터 — 전용 브랜치에서만 작업")
+    cq.add_argument("--limit", type=int, default=1)
+    cq.add_argument("--list", action="store_true", help="할 일만 보고 실행하지 않는다")
 
     sub.add_parser("browser-login", help="로그인용 창을 띄운다 (사람이 직접 로그인)")
 
@@ -149,6 +154,21 @@ def main() -> int:
         _out(result)
         if args.notify and any(v == "죽음" for v in result.values()):
             _out(agent.notify_login_required())
+    elif args.cmd == "listen":
+        from src.autoapply.notify import listener
+
+        conn = connect()
+        _out(listener.drain(conn))
+        conn.close()
+    elif args.cmd == "improve":
+        from src.autoapply import orchestrator
+
+        if args.list:
+            conn = connect()
+            _out(orchestrator.gather(conn))
+            conn.close()
+        else:
+            _out(orchestrator.run(limit=args.limit))
     elif args.cmd == "browser-login":
         from src.autoapply.runner import login
 

@@ -204,6 +204,23 @@ CREATE TABLE IF NOT EXISTS health_snapshots (
     metrics  TEXT NOT NULL              -- JSON: jobs/passed/actionable/blockers/...
 );
 
+-- 폰에서 보낸 개발/아키텍처 지시. 운영 명령과 다른 큐를 쓴다.
+--
+-- 운영 명령(/status, /pause)은 정해진 동작을 즉시 수행한다. 이쪽은 자유 텍스트라
+-- 코드를 고치게 되는데, 그건 검증 오라클이 없는 영역이다. 그래서 절대 main에
+-- 닿지 않는다 — 전용 브랜치에 커밋하고 사람이 보고 판단한다.
+CREATE TABLE IF NOT EXISTS control_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at  TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'queued',  -- queued|running|done|failed|skipped
+    branch       TEXT,
+    result       TEXT,
+    started_at   TEXT,
+    finished_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_control_status ON control_queue(status, id);
+
 -- 전역 설정. 텔레그램 봇 토큰/채팅 id 등, 코드에 박으면 안 되는 값들.
 CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,
