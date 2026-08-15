@@ -181,6 +181,66 @@ def _set_select(page, placeholder: str, value: str) -> bool:
     return False
 
 
+SKILL_ACTIVATOR = "text=직무 스킬"
+SKILL_INPUT = 'input[placeholder*="보유 스킬"]'
+# 이미 등록된 스킬 칩. 안내 문구가 사라진 뒤 입력칸을 다시 여는 통로다.
+SKILL_CHIP = '[class*="Skill"] button, [class*="skill"] button'
+
+
+def _fill_skills(page, skills: list[str], limit: int = 12) -> list[str]:
+    """스킬 칸을 채운다. 원티드 스킬 DB에 있는 것만 등록된다.
+
+    스킬 입력칸은 처음엔 DOM에 없다. 안내 문구를 눌러야 나타나고, 그 문구는
+    ActiveBox 오버레이에 덮여 있어 일반 클릭이 먹지 않는다(force 필요).
+
+    없는 스킬은 조용히 건너뛴다 — 원티드가 인정하지 않는 이름을 억지로 넣는 것보다
+    빠지는 게 낫다.
+    """
+    added: list[str] = []
+
+    # 스킬 입력칸은 상태에 따라 세 모습이다:
+    #   비어 있음      → "내가 가진 직무 스킬..." 안내 문구를 눌러 연다
+    #   이미 열림      → 그대로 쓴다
+    #   칩만 있고 접힘 → 안내 문구가 사라져 있다. 기존 칩을 눌러 다시 연다
+    # 세 번째를 빠뜨려 "입력칸을 못 찾음"으로 계속 실패했다.
+    box = page.locator(SKILL_INPUT).first
+    if not box.count():
+        # 칩은 클래스가 해시라 셀렉터로 못 잡는다. 넣으려는 스킬 이름으로 찾는다 —
+        # 이미 등록된 것이 있으면 그게 화면에 칩으로 떠 있다.
+        openers = [page.locator(SKILL_ACTIVATOR).first]
+        openers += [page.locator(f'span:text-is("{sk}")').first for sk in skills[:limit]]
+        for opener in openers:
+            if not opener.count():
+                continue
+            opener.scroll_into_view_if_needed()
+            page.wait_for_timeout(500)
+            opener.click(force=True)
+            page.wait_for_timeout(1600)
+            box = page.locator(SKILL_INPUT).first
+            if box.count():
+                break
+
+    if not box.count():
+        log.warning("스킬 입력칸을 열지 못했다")
+        return added
+    box.scroll_into_view_if_needed()
+
+    for skill in skills[:limit]:
+        box.fill("")
+        box.type(skill, delay=45)
+        page.wait_for_timeout(1600)
+        # 후보는 [role=option]이 아니라 span을 품은 button으로 뜬다.
+        # 정확히 일치하는 것만 고른다 — "React"를 치면 "React Native"도 같이 나온다.
+        opt = page.locator(f'button:has(span:text-is("{skill}"))')
+        if not opt.count():
+            log.info("스킬 후보 없음 — 건너뜀: %s", skill)
+            continue
+        opt.first.click(force=True)
+        page.wait_for_timeout(700)
+        added.append(skill)
+    return added
+
+
 # YYYY.MM 버튼의 화면상 순서. 편집기 레이아웃이 고정이라 순번으로 잡는다.
 # (섹션 제목이 h2/h3가 아니어서 DOM으로 소속을 찾을 수 없다)
 DATE_SLOTS = {"exp_start": 0, "exp_end": 1, "edu_start": 4, "edu_end": 5}
@@ -230,12 +290,16 @@ def open_editor(s: PlaywrightSession, *, resume_url: str | None = None) -> str:
     return s.url()
 
 
+ALL_STEPS = ("text", "experience", "education", "dates", "selects", "skills")
+
+
 def fill(
     data: dict[str, Any],
     *,
     resume_url: str | None = None,
     dry_run: bool = True,
     headless: bool = False,
+    only: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """조립된 JSON을 편집기에 채운다.
 
@@ -263,8 +327,10 @@ def fill(
                 "note": "입력하지 않음. 셀렉터 확인만 했다.",
             }
 
+        steps = only or ALL_STEPS
+
         # 단일 필드부터. 계정이 채워주는 값은 건드리지 않는다.
-        for key in ("summary", "ai_usage"):
+        for key in ("summary", "ai_usage") if "text" in steps else ():
             value = data.get(key)
             if value and found.get(key):
                 _set(p, FIELDS[key], str(value))
@@ -272,7 +338,7 @@ def fill(
 
         # 경력 — 첫 칸만 채운다. 칸을 새로 만들지 않는다.
         exps = data.get("experiences") or []
-        if exps and found.get("exp_company"):
+        if "experience" in steps and exps and found.get("exp_company"):
             e = exps[0]
             for key, src in (
                 ("exp_company", "company"),
@@ -294,7 +360,7 @@ def fill(
 
         # 학력 — 같은 원칙
         edus = data.get("educations") or []
-        if edus and found.get("edu_school"):
+        if "education" in steps and edus and found.get("edu_school"):
             ed = edus[0]
             for key, src in (
                 ("edu_school", "school"),
@@ -309,13 +375,13 @@ def fill(
         # 날짜 — 버튼+피커라 입력 필드와 처리가 다르다. 뒤에 몰아서 한다
         # (피커가 열려 있으면 다른 필드 클릭이 가려진다).
         dates: dict[str, bool] = {}
-        if exps:
+        if "dates" in steps and exps:
             e0 = exps[0]
             if e0.get("start"):
                 dates["exp_start"] = _set_date(p, DATE_SLOTS["exp_start"], e0["start"])
             if e0.get("end"):
                 dates["exp_end"] = _set_date(p, DATE_SLOTS["exp_end"], e0["end"])
-        if edus:
+        if "dates" in steps and edus:
             d0 = edus[0]
             if d0.get("start"):
                 dates["edu_start"] = _set_date(p, DATE_SLOTS["edu_start"], d0["start"])
@@ -324,10 +390,12 @@ def fill(
 
         # 필수 셀렉트. 이게 비면 완성도가 안 올라가고 지원 시 반려될 수 있다.
         selects: dict[str, bool] = {}
-        if exps:
+        if "selects" in steps and exps:
             selects["재직 형태"] = _set_select(p, "재직 형태", "정규직")
-        if edus:
+        if "selects" in steps and edus:
             selects["졸업 상태"] = _set_select(p, "졸업 상태", "졸업")
+
+        skills = _fill_skills(p, data.get("skills") or []) if "skills" in steps else []
 
         p.wait_for_timeout(3000)  # 자동 저장이 붙을 시간
 
@@ -345,7 +413,7 @@ def fill(
             "url": url, "dry_run": False,
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
-            "dates": dates, "selects": selects,
+            "dates": dates, "selects": selects, "skills": skills,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
         }
