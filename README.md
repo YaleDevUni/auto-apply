@@ -1,14 +1,30 @@
-# autoapply v2
+# autoapply
 
-채용공고 수집 → 필터 → **지원가능성 판정**. 사람이 UI에서 훑는 게 아니라,
-자동화 에이전트가 DB를 읽고 지원 가능한 것만 골라 지원하는 것을 전제로 만들었다.
+채용공고 수집 → 판정 → **이력서 조립 → 플랫폼 등록 → 지원 폼 작성**까지 자동으로
+간다. 제출만 사람이 누른다.
 
 ```bash
-python cli.py scrape      # 수집 + 판정
-python cli.py targets     # 에이전트가 지원할 목록 (JSON)
-python cli.py blocked     # 왜 아무것도 지원 안 했는지
-python cli.py status      # 한 줄 요약
+python cli.py autoapply <job_id>          # 조립 → 등록 → 폼 작성 (dry-run)
+python cli.py autoapply <job_id> --live   # 제출. 되돌릴 수 없다
+python cli.py cycle-apply                 # 대기열 상위 1건을 준비하고 폰으로 사진 전송
+python cli.py status                      # 한 줄 요약
+python cli.py blocked                     # 왜 막혔는지
+python cli.py resumes                     # 플랫폼 이력서 목록 (읽기 전용)
 ```
+
+## 한 사이클
+
+```
+수집·판정        코드      LLM 0회. 4,107건 → 적합 2,785 → 지원가능 126
+이력서 조립      LLM 2회   작성(sonnet) + 검수(haiku). 40초, 72시간 캐시
+플랫폼 등록      코드      원티드 편집기 자동 입력. 완성도 100%
+지원 폼 작성     코드      레시피(JSON). dry-run이 기본값
+─────────────────────────────────────────────
+검토             사람      폰으로 채워진 폼 스크린샷을 받는다
+제출             사람      autoapply <id> --live
+```
+
+LLM이 들어가는 곳은 **이력서 작성과 검수 두 군데뿐**이다. 나머지는 전부 코드다.
 
 ---
 
@@ -118,74 +134,58 @@ python cli.py quota    # 오늘 몇 건 남았는지
 
 ---
 
-## 실측 결과 (2026-08-15, 원티드)
+## 실측 결과 (2026-08-16)
 
 ```
-수집 1157건 → 적합 702건 → 자동지원 가능 34건 → 실제 제출 1건 ✅
+수집 4,107건 → 적합 2,785건 → 자동지원 가능 126건 → 제출 1건
 ```
 
-레시피가 없을 때는 702건 전부 `NO_RECIPE`로 막혀 자동지원 가능 0건이었다.
-`recipes/wanted.json`을 쓰고 재판정하니 34건이 열렸다. 남은 blocker:
+주요 blocker:
 
-| blocker | 건수 | 해소 방법 |
-|---|---|---|
-| `SCORE_BELOW_BAR` | 656 | 기준 75점. 조정 가능 |
-| `NO_DETAIL` | 628 | `scrape.detail_limit` 상향 (현재 120) |
-| `ESSAY_REQUIRED` | 11 | 원티드엔 문항이 없다 — 본문 정규식 오탐으로 보인다. 확인 필요 |
-| `DOC_MISSING` | 6 | 서류 준비 후 `available_documents`에 등록 |
-
-### 첫 자동지원 (원장 id=2)
-
-```
-이빗 · [인턴] 글로벌 콘텐츠 마케터
-0:goto → 1:click(건너뜀) → 2:expect → 3:check → 4:expect → 5:submit
-→ "지원이 완료되었습니다!" 확인 → submitted 기록 → 상한 1/10 소진
-```
-
-### 실제 폼은 설계 예상과 달랐다
-
-`capture`로 뜯어보고 알게 된 것 — **원티드 지원에는 LLM이 낄 자리가 거의 없다.**
-
-| 예상 | 실제 |
+| blocker | 성격 |
 |---|---|
-| 이름·연락처를 fill | 계정에서 자동으로 채워짐. fill 스텝 불필요 |
-| 이력서 파일 업로드 | 플랫폼에 저장된 이력서를 **고름**. 업로드 없음 |
-| 자소서 문항 작성 | **문항 자체가 없음** |
+| `SCORE_BELOW_BAR` | 정상. 기준 75점 |
+| `NO_DETAIL` | `scrape.detail_limit` 한계. 통과분이 늘면 뒤가 밀린다 |
+| `REQUIREMENT_GAP` | 이력서를 조립해보니 필수요건 근거가 없더라 (아래) |
+| `EXTERNAL_ATS` | 외부 채용시스템. 구조상 자동화 불가 |
 
-실제 동작은 `이력서 체크 → 제출` 둘뿐이다. 이력서 어셈블러(MD SSOT)는 원티드에는
-필요 없다는 뜻이다 — 문서를 만들어 올리는 게 아니라 이미 있는 것을 선택하므로.
+### 어셈블러가 판정의 사각지대를 메운다
 
-두 가지가 레시피를 안정시킨다:
+적합도 점수는 **공고에 그 키워드가 있는지만** 세고 사용자가 실제로 할 수 있는지와
+대조하지 않는다. 실측: 132점 최고점 공고(Java/Spring 백엔드)가 Java 실무·Oracle·ERP
+전부 근거 없음이었다.
 
-- **셀렉터는 `data-attribute-id`를 쓴다.** 클래스명(`Applying_footer__applyButton__eUQSq`)은
-  CSS 모듈 해시라 배포마다 바뀐다 — 레시피가 조용히 깨지는 가장 흔한 원인이다.
-- **플랫폼이 공짜 안전장치를 준다.** 이력서를 안 고르면 제출 버튼이 `disabled`다.
-  그래서 `:not([disabled])` 확인이 실패하면 애초에 제출이 불가능하다.
-
-> 지원 패널은 공고마다 이미 열려 있기도 하고 버튼을 눌러야 하기도 한다. 그래서
-> 클릭 스텝은 `optional`이다. 첫 시도가 `#name`을 못 찾고 멈춰서 알아낸 사실이고,
-> 실패 스크린샷이 없었으면 원인을 못 찾았을 것이다.
-
-> 개발 중 `IMAGE_ONLY`가 628건 잡혔는데 **전부 오탐**이었다. 원티드는 공고마다
-> 표지 썸네일 `image_url`이 붙는데 그걸 '이미지형 공고'로 오인한 것이다. 판별
-> 기준을 `image_path`(어댑터가 본문이 이미지라고 판단해 실제로 받아온 것)로
-> 바꿔 해소했다. 진단면(`cli.py blocked`)이 없었으면 못 찾았을 버그다.
-
----
+어셈블러는 공고를 읽으며 그걸 이미 세고 있었다. `resume_builds`에 남기고
+`applicability`가 `REQUIREMENT_GAP`으로 읽는다. 한 번 조립해본 공고에만 붙으므로
+첫 시도가 알아내고 이후 판정이 그 공고를 목록에서 뺀다.
 
 ## 구조
 
 ```
 config.yaml              필터 규칙 + 자동지원 기준. 코드 수정 없이 여기만 고친다
-cli.py                   cron 진입점. 출력은 항상 JSON
+NEXT.md                  작업 큐. 자기개선 루프가 읽는다
+cli.py                   진입점. 출력은 항상 JSON
+schedule/                launchd — 2시간마다 깨어난다
 src/autoapply/
   normalize.py           canonical_key — 중복지원 방어선
   db.py                  스키마 + v_actionable / v_blocked 뷰
-  agent.py               에이전트 인터페이스 (claim / mark_submitted / blocked_summary)
+  agent.py               claim / mark_submitted / quota — 모든 지원이 지나는 관문
   pipeline.py            수집 → 두 축 판정 → 저장
+  health.py              L1 이상 감지 (LLM 0회)
+  llm.py                 claude CLI 호출. 하네스를 걷어내 입력 2토큰
+  assemble.py            이력서 조립: 작성 → 검수 → 보강
+  render.py              MD → PDF (Playwright print-to-PDF)
+  orchestrator.py        자기개선. 브랜치에서만 움직인다
   adapters/              wanted · saramin · jasoseol
+  notify/                telegram — 알림 · 사진 · 폰 명령 수신
+  runner/
+    session.py           브라우저. Session 프로토콜로 백엔드 교체 가능
+    probe.py             세션 생사 확인
+    apply.py             레시피 실행. dry-run이 기본값
+    resume_editor.py     원티드 이력서 편집기 자동 입력
+    capture.py           폼 DOM 캡처 (레시피 작성 근거)
   screening/
-    rules.py             축 1: 적합도 (v1 검증 로직)
+    rules.py             축 1: 적합도
     applicability.py     축 2: 지원가능성
 ```
 
@@ -207,33 +207,51 @@ for t in agent.next_targets(limit=5):
 
 ---
 
-## 텔레그램 알림 — 에이전트가 스스로 못 넘는 지점
+## 폰이 검토 창구다
 
-승인 게이트(v1의 `request_approval` — 지원 직전에 폰으로 물어보고 대기)와는 다르다.
-v2는 완전 자동화가 목표라 그 게이트를 기본값으로 넣지 않았다. 대신 **일방향 알림** —
-보내고 계속 진행한다. 필요해지면 v1 설계를 그대로 옮겨오면 된다(이미 검증됨).
+준비된 지원서의 **채워진 폼 스크린샷**이 폰으로 온다. 셀렉터나 로그를 보내는 건
+의미가 없다 — 사람은 `button.css-1x2y3z`가 맞는 버튼인지 알 수 없지만 사진은 안다.
 
-```bash
-python cli.py telegram-setup <봇토큰>   # 최초 1회. @BotFather → /newbot → 봇에게 메시지 한 번 → 토큰
-python cli.py notify-login              # 수동 트리거 (쿨다운 적용)
+```
+📄 지원 준비됨
+124점 · 인졀미 — 서비스 운영·SW 개발자
+[스크린샷]
+
+확인 후 제출:
+python cli.py autoapply 179 --live
 ```
 
-`scrape` 끝에서 자동으로 붙는다. 실측(2026-08-15)으로 확정된 이유:
+`apply --live`가 아니라 `autoapply --live`인 이유: 전자는 이력서를 다시 채우지 않고
+제목으로 고르기만 한다. 미리보기 이력서는 다음 사이클이 덮어쓰므로, 나중에 제출하면
+**다른 공고용 이력서가 나간다.** 후자는 제출 직전에 그 공고용으로 다시 채운다.
+
+운영 명령도 폰에서 받는다:
+
+```
+/status /quota /blocked /targets /pause /resume /queue
+그 외 자유 텍스트 → 개발 지시 큐 (브랜치에서만 작업, main 금지)
+```
+
+`/pause`가 실질적으로 쓸모 있다 — 뭔가 이상하면 지원 준비만 멈추고 수집·판정은
+계속 돌릴 수 있다.
+
+### 세션이 죽으면 사람을 부른다
+
 원티드는 지원에 OAuth 로그인이 필요하고 **자동 로그인 경로가 없다.** 그래서
-`LOGIN_REQUIRED`는 에이전트가 재시도로 못 넘는 지점이고, 이 알림이 그 지점에서
-사람을 부르는 유일한 통로다.
+`LOGIN_REQUIRED`는 재시도로 못 넘는 지점이고, 알림이 유일한 통로다.
+
+세션 판정은 세 갈래다. **모르는 것과 죽은 것을 구분한다** — 확인 불가를 죽음으로
+처리하면 멀쩡한 세션에 대해 사람을 불러대고 판정이 오염된다:
 
 ```
-🔒 로그인 필요
-· wanted: 702건 막힘 — 다시 로그인해 주세요
+로그인 페이지로 튕김        → 죽음 (확정)
+로그인 상태에서만 닿는 URL  → 살아있음 (확정)
+둘 다 아님                  → 확인 불가
 ```
 
-`notify.telegram.cooldown_hours`(기본 6시간)로 도배를 막는다 — cron이 매시간
-돌아도 세션이 안 살아나는 한 6시간에 한 번만 온다.
-
-**지금 이 알림은 캐스터가 명시적으로 알려줘야 켜진다** (`--session wanted=0`).
-세션 생사를 스스로 확인하는 건 아직 없다 — 아래 Playwright 실행기가 붙을 때
-실제 신호(로그인 페이지로 튕김)로 자동 트리거된다.
+URL 리다이렉트를 DOM 셀렉터보다 먼저 본다. 렌더링 타이밍과 무관하게 결정되므로
+느린 환경(launchd 콜드스타트)에서도 흔들리지 않는다 — 실제로 셀렉터 방식은
+03시 실행에서 멀쩡한 세션을 죽었다고 판정했다.
 
 ---
 
@@ -242,8 +260,8 @@ python cli.py notify-login              # 수동 트리거 (쿨다운 적용)
 ```bash
 python cli.py browser-login        # 사람이 한 번 로그인. 세션은 profile/browser/ 에 남는다
 python cli.py capture <job_id>     # 폼 DOM을 떠서 JSON + 스크린샷 (아무것도 제출 안 함)
-python cli.py apply <job_id>       # dry-run: 다 채우고 제출 직전에 멈춘다
-python cli.py apply <job_id> --live  # 실제 제출. 되돌릴 수 없다
+python cli.py autoapply <job_id>   # dry-run: 조립·등록·폼 작성까지, 제출 직전에 멈춘다
+python cli.py autoapply <job_id> --live  # 실제 제출. 되돌릴 수 없다
 ```
 
 `--live` 없이는 `submit` 스텝이 **실행되지 않는다.** 나머지는 전부 실제로 한다 —
@@ -254,9 +272,9 @@ python cli.py apply <job_id> --live  # 실제 제출. 되돌릴 수 없다
 알 수 있다.** 그래서 레시피 승인은 사진으로 받는다.
 
 ```
-dry-run  0:goto → 1:fill → 2:fill → 3:expect → 4:submit(skipped)   ✓ 스크린샷
-live     0:goto → 1:fill → 2:fill → 3:expect → 4:submit → 완료화면 확인 → 원장 기록
-셀렉터오류 0:goto → 정지, 이유와 함께. 실패 화면도 스크린샷으로 남는다
+dry-run   0:goto → 1:click → 2:expect → 3:check → 4:expect → 5:submit(skipped)  ✓ 스크린샷
+live      … → 5:submit → 완료화면 확인 → 원장 기록
+셀렉터오류 멈춤 + 이유. 실패 화면도 스크린샷으로 남는다
 ```
 
 dry-run은 **선점하지 않는다.** 제출하지 않으니 자리를 잡을 이유가 없고, 잡으면
@@ -280,14 +298,31 @@ dry-run은 **선점하지 않는다.** 제출하지 않으니 자리를 잡을 �
 한다(`assert_logged_in`). 만료된 쿠키도 파일에는 남아 있기 때문이다. 폼을 반쯤
 채운 뒤 튕기는 경우가 있어 스텝마다 확인한다.
 
+### 브라우저 자동화에서 반복해 밟은 함정
+
+전부 **"시킨 대로 됐다고 믿었는데 아니었던"** 부류다. 화면에는 정상으로 보인다.
+
+| 증상 | 원인 |
+|---|---|
+| 값이 화면엔 있는데 새로고침하면 사라짐 | React 제어 입력에 blur/change가 안 나감 → `click → fill → Tab` |
+| 회사명·학교명이 잘려서 저장됨 | 자동완성 드롭다운 재렌더 중 타이핑 유실. 확정 후 대조·교정이 본체 |
+| 날짜를 골랐는데 되돌아감 | **저장 요청이 아예 안 나감.** 같은 항목의 다른 칸을 건드려야 PATCH가 나간다 |
+| 날짜가 엉뚱한 칸에 들어감 | `has-text("YYYY.MM")`은 빈 칸만 잡아 채울 때마다 인덱스가 밀림 |
+| 클릭이 15초 타임아웃 | 팝업 뒤 투명 백드롭이 가로챔. 단 submit은 force 금지 |
+| 다음 섹션이 안 열림 | 앞 섹션 팝업이 살아있음. Escape·blur로는 안 닫히고 **다른 제목을 클릭**해야 닫힘 |
+| 완성도 100%인데 지원에 못 씀 | `작성 완료`를 눌러야 '작성 중'을 벗어난다 |
+
+그래서 모든 입력 뒤에 **넣은 값과 저장된 값을 대조**한다. 그게 없으면 전부
+조용히 지나갔을 문제들이다.
+
 ---
 
 ## 남은 것
 
-- [x] `recipes/wanted.json` — 실측 기반 작성, 실제 제출로 검증됨
-- [ ] `ESSAY_REQUIRED` 11건 오탐 확인 — 원티드엔 문항이 없는데 정규식이 잡고 있다
-- [ ] 사람인·자소설 레시피 (여긴 자소서 문항이 실제로 있다 — 이력서 어셈블러가 필요한 쪽)
-- [ ] 신규성 기반 승인 게이트 — 점수가 아니라 **검증 안 된 (플랫폼 × 레시피 버전)** 의 첫 N건만 사람 확인
-- [ ] 자소서 생성기 (`essays.autowrite`를 켜려면 필요)
-- [ ] 제출 확인 이중화 — 완료 화면 + 플랫폼 '지원현황' 대조
-- [ ] cron/launchd 등록
+`NEXT.md`가 실제 작업 큐다. 자기개선 루프가 그걸 읽고 하나씩 처리한다.
+
+- [ ] `autoapply --live` 경로는 아직 실제로 제출해본 적이 없다 (dry-run까지만 검증)
+- [ ] 경력·학력 2건 이상 — 추가 진입점을 못 찾음
+- [ ] 사람인·자소설 레시피 (어댑터는 검증됨: 2,129건 / 818건)
+- [ ] 제출 확인 이중화 — 완료 화면 + 플랫폼 지원현황 대조
+- [ ] 결과 피드백 (합격/불합격) → scoring 보정
