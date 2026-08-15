@@ -214,7 +214,7 @@ SKILL_INPUT = 'input[placeholder*="보유 스킬"]'
 SKILL_CHIP = '[class*="Skill"] button, [class*="skill"] button'
 
 
-def _fill_skills(page, skills: list[str], limit: int = 12) -> list[str]:
+def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], list[str]]:
     """스킬 칸을 채운다. 원티드 스킬 DB에 있는 것만 등록된다.
 
     스킬 입력칸은 처음엔 DOM에 없다. 안내 문구를 눌러야 나타나고, 그 문구는
@@ -224,6 +224,7 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> list[str]:
     빠지는 게 낫다.
     """
     added: list[str] = []
+    skipped: list[str] = []
 
     # 스킬 입력칸은 상태에 따라 세 모습이다:
     #   비어 있음      → "내가 가진 직무 스킬..." 안내 문구를 눌러 연다
@@ -249,7 +250,7 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> list[str]:
 
     if not box.count():
         log.warning("스킬 입력칸을 열지 못했다")
-        return added
+        return added, skipped
     box.scroll_into_view_if_needed()
 
     for skill in skills[:limit]:
@@ -260,12 +261,16 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> list[str]:
         # 정확히 일치하는 것만 고른다 — "React"를 치면 "React Native"도 같이 나온다.
         opt = page.locator(f'button:has(span:text-is("{skill}"))')
         if not opt.count():
+            # 원티드 스킬 DB에 없는 이름이다. 억지로 넣을 수 없으므로 건너뛰되
+            # 무엇이 빠졌는지 보고한다 — 많이 빠지면 가이드의 스킬 표기를
+            # 원티드 표기에 맞춰야 한다는 신호다.
             log.info("스킬 후보 없음 — 건너뜀: %s", skill)
+            skipped.append(skill)
             continue
         opt.first.click(force=True)
         page.wait_for_timeout(700)
         added.append(skill)
-    return added
+    return added, skipped
 
 
 # 링크 행 컨테이너. 클래스 대부분이 해시(wds-*)인데 이것만 의미 있는 이름이라
@@ -537,7 +542,9 @@ def fill(
         if "selects" in steps and edus:
             selects["졸업 상태"] = _set_select(p, "졸업 상태", "졸업")
 
-        skills = _fill_skills(p, data.get("skills") or []) if "skills" in steps else []
+        skills, skills_skipped = (
+            _fill_skills(p, data.get("skills") or []) if "skills" in steps else ([], [])
+        )
         links = _fill_links(p, data.get("links") or []) if "links" in steps else []
 
         p.wait_for_timeout(3000)  # 자동 저장이 붙을 시간
@@ -560,7 +567,7 @@ def fill(
             "url": url, "title": title, "dry_run": False,
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
-            "dates": dates, "selects": selects, "finalized": finalized, "skills": skills, "links": links,
+            "dates": dates, "selects": selects, "finalized": finalized, "skills": skills, "skills_skipped": skills_skipped, "links": links,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
         }
