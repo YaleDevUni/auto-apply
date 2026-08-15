@@ -41,6 +41,38 @@ def _set(page, selector: str, value: str) -> None:
     loc.press("Tab")
     page.wait_for_timeout(350)
 
+def _set_autocomplete(page, selector: str, value: str) -> None:
+    """자동완성 드롭다운이 붙은 필드를 채운다.
+
+    회사명·학교명·전공은 그냥 입력하면 저장되지 않는다. 원티드가 자체 DB에서
+    후보를 띄우고 **목록에서 고르거나 '직접 입력하기'를 눌러야** 값이 확정된다.
+    fill()로 넣으면 화면엔 글자가 보이지만 새로고침하면 사라진다 —
+    실측에서 회사명·학교명·전공 셋이 정확히 그렇게 유실됐다.
+
+    타이핑을 한 글자씩 하는 이유: fill()은 입력 이벤트를 한 번에 밀어넣어
+    드롭다운 검색이 트리거되지 않는다.
+    """
+    loc = page.locator(selector).first
+    loc.click()
+    loc.fill("")
+    loc.type(value, delay=55)
+    page.wait_for_timeout(2200)
+
+    # 목록에 정확히 일치하는 후보가 있으면 그것을, 없으면 '직접 입력하기'를 고른다.
+    exact = page.locator(f'[role=option]:has-text("{value}")')
+    direct = page.locator('[role=option]:has-text("직접 입력")')
+    target = direct.first if direct.count() else (exact.first if exact.count() else None)
+    if target is None:
+        log.warning("자동완성 후보를 못 찾음: %s = %s", selector, value)
+        loc.press("Tab")
+        return
+    target.click()
+    page.wait_for_timeout(900)
+
+
+# 자동완성이 붙은 필드. 일반 입력으로는 확정되지 않는다.
+AUTOCOMPLETE = ("exp_company", "edu_school", "edu_major")
+
 CV_URL = "https://www.wanted.co.kr/cv"
 
 # 실측(2026-08-16)으로 확인한 편집기 필드. placeholder는 문구가 길어 앞부분만 쓴다.
@@ -132,7 +164,8 @@ def fill(
                 ("exp_business_title", "business_title"),
             ):
                 if e.get(src) and found.get(key):
-                    _set(p, FIELDS[key], str(e[src]))
+                    setter = _set_autocomplete if key in AUTOCOMPLETE else _set
+                    setter(p, FIELDS[key], str(e[src]))
                     filled[key] = str(e[src])[:40]
 
             ach = (e.get("achievements") or [{}])[0]
@@ -153,7 +186,8 @@ def fill(
                 ("edu_detail", "detail"),
             ):
                 if ed.get(src) and found.get(key):
-                    _set(p, FIELDS[key], str(ed[src]))
+                    setter = _set_autocomplete if key in AUTOCOMPLETE else _set
+                    setter(p, FIELDS[key], str(ed[src]))
                     filled[key] = str(ed[src])[:40]
 
         p.wait_for_timeout(3000)  # 자동 저장이 붙을 시간
