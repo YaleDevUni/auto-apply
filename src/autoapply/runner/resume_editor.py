@@ -114,6 +114,25 @@ def _dismiss(page) -> None:
         page.wait_for_timeout(400)
 
 
+def _flush(page, field: str, value: Any) -> None:
+    """같은 항목의 텍스트 칸을 다시 건드려 저장을 깨운다.
+
+    실측(2026-08-16): 학력 종료일을 피커로 바꾸면 화면에는 반영되는데
+    **저장 요청이 아예 나가지 않는다.** 새로고침하면 서버 값(오늘 날짜)이 돌아온다.
+    같은 학력 항목의 다른 칸을 편집하면 그때 `PATCH .../educations/{id}`가 나가고
+    날짜까지 함께 저장된다.
+
+    날짜 피커가 자체적으로 저장을 트리거하지 않는 구조라, 값을 바꾼 뒤 형제
+    필드를 한 번 두드려주는 게 유일한 방법이다.
+    """
+    if not value or field not in FIELDS:
+        return
+    try:
+        _set(page, FIELDS[field], str(value))
+    except Exception as e:  # noqa: BLE001
+        log.warning("저장 유발 실패 (%s): %s", field, e)
+
+
 def _date_buttons(page):
     """날짜 버튼 **전체**를 순서대로 준다.
 
@@ -613,6 +632,7 @@ def fill(
                     dates["edu_start"] = _set_date(p, slots["edu_start"], d0["start"])
                 if d0.get("end"):
                     dates["edu_end"] = _set_date(p, slots["edu_end"], d0["end"])
+                _flush(p, "edu_detail", d0.get("detail"))
 
         # 필수 셀렉트. 비면 완성도가 안 올라가고 지원 시 반려될 수 있다.
         selects: dict[str, bool] = {}
