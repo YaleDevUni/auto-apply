@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,24 @@ def _count_essays(text: str) -> int:
 
 def _recipe_exists(recipe_dir: Path, platform: str) -> bool:
     return (recipe_dir / f"{platform}.json").exists()
+
+
+@lru_cache(maxsize=8)
+def _recipe(recipe_dir: Path, platform: str) -> dict[str, Any] | None:
+    """레시피를 읽는다. 판정이 폼의 실제 모양을 알아야 하는 경우가 있다.
+
+    구체적으로 자소서 문항: 본문에 '자기소개서'가 있다고 자동지원이 막히는 게
+    아니다. 원티드는 지원 폼에 문항 입력란이 **없고** 이력서 문서 하나만 받는다.
+    그 경우 자기소개서 언급은 '이력서에 담을 내용'이지 '폼에서 막히는 지점'이
+    아니다. 레시피만이 그 차이를 안다.
+    """
+    path = recipe_dir / f"{platform}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def evaluate(
@@ -233,17 +252,31 @@ def evaluate(
     n_essays = _count_essays(job.description)
     if job.raw.get("has_resume"):  # 자소설닷컴이 명시적으로 주는 플래그
         n_essays = max(n_essays, 1)
+    # 폼에 문항 입력란이 있는 플랫폼인지 레시피에 물어본다. 없으면(원티드)
+    # 자기소개서 언급은 '이력서 문서에 담을 내용'이지 폼에서 막히는 지점이 아니다.
+    #
+    # 실측(2026-08-15): 이 구분이 없을 때 원티드 52건이 ESSAY_REQUIRED로 막혔는데
+    # 전부 "제출서류: 이력서, 자기소개서, 포트폴리오" 같은 안내문이었다. 실제
+    # 지원 폼에는 문항 칸이 없다 — 이력서 하나 고르고 제출이 전부다.
+    recipe = _recipe(recipe_dir, job.platform)
+    form_has_essays = recipe.get("form_essays", True) if recipe else True
+
     if n_essays:
         requires["essays"] = n_essays
-        if not essay_cfg.get("autowrite", False):
+        max_auto = essay_cfg.get("max_autowrite", 3)
+
+        if not form_has_essays:
+            # 막지 않는다. 이력서를 조립할 때 반영할 요구사항으로만 남긴다.
+            requires["essay_in_document"] = True
+        elif not essay_cfg.get("autowrite", False):
             blockers.append(
                 _block("ESSAY_REQUIRED", "자소서 문항 있음 — 자동작성 꺼져 있음",
                        f"약 {n_essays}문항")
             )
-        elif n_essays > essay_cfg.get("max_autowrite", 3):
+        elif n_essays > max_auto:
             blockers.append(
                 _block("ESSAY_TOO_MANY", "자소서 문항이 자동작성 한도 초과",
-                       f"{n_essays}문항 > 한도 {essay_cfg.get('max_autowrite', 3)}")
+                       f"{n_essays}문항 > 한도 {max_auto}")
             )
 
     # 7) 첨부서류. 미리 준비 안 돼 있으면 폼 중간에서 막힌다.

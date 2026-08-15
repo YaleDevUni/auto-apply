@@ -14,6 +14,27 @@
     "CSS 모듈 해시라 배포 때마다 바뀐다 — 레시피가 조용히 깨지는 가장 흔한 원인이다."
   ],
   "login_dead_pattern": "id\\.wanted\\.co\\.kr|/login|/signup",
+
+  "session_probe_url": "https://www.wanted.co.kr/cv",
+  "session_alive_selector": "button:has-text(\"새 이력서 작성\")",
+  "_session_probe_why": [
+    "쿠키 파일 존재로는 세션 생사를 알 수 없다 — 만료된 쿠키도 파일에는 남아 있다.",
+    "실제로 이동해보는 수밖에 없다. 실측한 두 상태:",
+    "  로그인:   /cv → /cv/list   '새 이력서 작성' 버튼 있음",
+    "  로그아웃: /cv → /cv/intro  로그인/회원가입 링크",
+    "URL 리다이렉트로도 구분되지만, '있어야 할 것이 있는지'(positive)로 본다.",
+    "실패 URL을 나열하는 방식은 새 리다이렉트가 생길 때마다 조용히 뚫린다."
+  ],
+
+
+  "form_essays": false,
+  "_form_essays_why": [
+    "원티드 지원 폼에는 자소서 문항 입력란이 없다. 이력서 하나 고르고 제출이 전부다.",
+    "그래서 공고 본문에 '자기소개서'가 나와도 지원이 막히지 않는다 — 그건 제출할",
+    "이력서 문서에 담을 내용이지 폼에서 걸리는 지점이 아니다.",
+    "이 값이 false면 판정이 ESSAY_REQUIRED(blocker) 대신 requires.essay_in_document로 낸다.",
+    "자소설·사람인처럼 폼에 실제 문항 칸이 있는 플랫폼은 true로 둔다(기본값)."
+  ],
   "steps": [
     { "do": "goto", "url": "{job.url}" },
 

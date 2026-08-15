@@ -40,8 +40,17 @@ def main() -> int:
         action="append",
         default=[],
         metavar="PLATFORM=0|1",
-        help="플랫폼별 로그인 세션 유효 여부 (예: --session wanted=1)",
+        help="플랫폼별 로그인 세션 유효 여부 수동 지정 (예: --session wanted=1)",
     )
+    sp.add_argument(
+        "--check-session",
+        action="store_true",
+        help="수집 전에 브라우저로 세션 생사를 실제 확인한다 (플랫폼당 ~10초)",
+    )
+
+    ssp = sub.add_parser("session-check", help="로그인 세션이 살아있는지 실제로 확인")
+    ssp.add_argument("--platform", action="append")
+    ssp.add_argument("--notify", action="store_true", help="죽었으면 텔레그램으로 알린다")
 
     sub.add_parser("reevaluate", help="재수집 없이 재판정")
 
@@ -86,6 +95,11 @@ def main() -> int:
 
     if args.cmd == "scrape":
         session_ok = {}
+        if args.check_session:
+            from src.autoapply.runner import check_all
+
+            session_ok.update(check_all(args.platform))
+        # 수동 지정이 탐침 결과를 덮는다. 사람이 아는 게 더 정확한 경우가 있다.
         for item in args.session:
             k, _, v = item.partition("=")
             session_ok[k.strip()] = v.strip() not in ("0", "false", "no", "")
@@ -109,6 +123,13 @@ def main() -> int:
         conn.close()
     elif args.cmd == "notify-login":
         _out(agent.notify_login_required())
+    elif args.cmd == "session-check":
+        from src.autoapply.runner import probe
+
+        result = probe.describe(args.platform)
+        _out(result)
+        if args.notify and any(v == "죽음" for v in result.values()):
+            _out(agent.notify_login_required())
     elif args.cmd == "browser-login":
         from src.autoapply.runner import login
 
