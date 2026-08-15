@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -86,6 +87,38 @@ def setup(conn: sqlite3.Connection, token: str) -> dict[str, Any]:
         "chat_id": chat["id"],
         "chat_name": chat.get("first_name") or chat.get("title", ""),
     }
+
+
+def send_photo(conn: sqlite3.Connection, path: str, caption: str = "") -> bool:
+    """스크린샷을 보낸다. 이게 '검토' 단계의 실물이다.
+
+    셀렉터나 로그를 보내는 건 의미가 없다 — 사람은 `button.css-1x2y3z`가 맞는
+    버튼인지 알 수 없다. 다 채워진 폼 사진은 알 수 있다. 폰으로 그 사진을 보고
+    제출 여부를 판단하는 것이 이 파이프라인의 사람 몫이다.
+
+    캡션은 텔레그램 제한(1024자)에 맞춰 자른다.
+    """
+    p = Path(path)
+    if not p.exists():
+        log.info("보낼 스크린샷이 없다: %s", path)
+        return False
+    try:
+        token, chat = _creds(conn)
+        with p.open("rb") as fh:
+            r = httpx.post(
+                API.format(token=token, method="sendPhoto"),
+                data={"chat_id": chat, "caption": caption[:1024], "parse_mode": "HTML"},
+                files={"photo": (p.name, fh, "image/png")},
+                timeout=60,
+            )
+        r.raise_for_status()
+        return bool(r.json().get("ok"))
+    except TelegramNotConfigured:
+        log.info("텔레그램 미설정 — 사진 전송 건너뜀")
+        return False
+    except Exception as e:  # noqa: BLE001
+        log.warning("사진 전송 실패(무시): %s", e)
+        return False
 
 
 def notify(conn: sqlite3.Connection, text: str) -> bool:

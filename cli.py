@@ -238,7 +238,39 @@ def _cycle_apply(limit: int) -> dict:
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
+        _report_prepared(t, r)
     return {"prepared": len(out), "items": out}
+
+
+def _report_prepared(target: dict, result: dict) -> None:
+    """준비 결과를 폰으로 보낸다. 성공이면 **스크린샷**, 실패면 이유.
+
+    실패가 로그에만 남으면 아침에 로그를 뒤져야 안다 — 실제로 06시 사이클이
+    클릭 타임아웃으로 통째로 실패했는데 그렇게 발견했다. 무인 운영에서
+    "아무 일도 안 일어남"과 "망가져서 못 함"은 겉보기에 같다.
+    """
+    from src.autoapply.db import connect as _c
+    from src.autoapply.notify import telegram
+
+    conn = _c()
+    try:
+        head = f"{target['fit_score']}점 · {target['company']} — {target['title'][:40]}"
+        apply_res = result.get("apply") or {}
+        err = result.get("error") or apply_res.get("error") or result.get("stopped")
+
+        if err:
+            telegram.notify(conn, f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{str(err)[:200]}</i>")
+            return
+
+        shot = apply_res.get("evidence")
+        caption = (
+            f"📄 <b>지원 준비됨</b>\n{head}\n\n"
+            f"확인 후 제출:\n<code>python cli.py apply {target['job_id']} --live</code>"
+        )
+        if not (shot and telegram.send_photo(conn, shot, caption)):
+            telegram.notify(conn, caption)
+    finally:
+        conn.close()
 
 
 def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
