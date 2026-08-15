@@ -16,6 +16,7 @@
   "login_dead_pattern": "id\\.wanted\\.co\\.kr|/login|/signup",
 
   "session_probe_url": "https://www.wanted.co.kr/cv",
+  "session_alive_url": "/cv/list",
   "session_alive_selector": "button:has-text(\"새 이력서 작성\")",
   "_session_probe_why": [
     "쿠키 파일 존재로는 세션 생사를 알 수 없다 — 만료된 쿠키도 파일에는 남아 있다.",

@@ -46,17 +46,30 @@ UNVERIFIED = re.compile(r"\[확인필요[^\]]*\]")
 GAP_HEADING = re.compile(r"^#{1,3}\s*대응\s*근거\s*없음\s*$", re.MULTILINE)
 
 
-def split_report(text: str) -> tuple[str, list[str]]:
-    """(제출용 본문, 대응 근거 없는 요건 목록)으로 가른다."""
+def split_report(text: str) -> tuple[str, list[dict[str, str]]]:
+    """(제출용 본문, 대응 근거 없는 요건 목록)으로 가른다.
+
+    각 항목은 {level: 필수|우대|미상, text: ...}. level이 '필수'인 게 쌓이면
+    적합도 점수가 과대평가됐다는 신호다 — 점수는 공고에 그 키워드가 있는지만
+    세고, 사용자가 실제로 할 수 있는지와 대조하지 않기 때문이다.
+    """
     m = GAP_HEADING.search(text)
     if not m:
         return text.strip(), []
+
     body = text[: m.start()].strip()
-    gaps = [
-        ln.strip().lstrip("-·• ").strip()
-        for ln in text[m.end():].splitlines()
-        if ln.strip().startswith(("-", "·", "•"))
-    ]
+    gaps: list[dict[str, str]] = []
+    for ln in text[m.end():].splitlines():
+        ln = ln.strip()
+        if not ln.startswith(("-", "·", "•")):
+            continue
+        item = ln.lstrip("-·• ").strip()
+        level = "미상"
+        for tag in ("필수", "우대"):
+            if item.startswith(f"[{tag}]"):
+                level, item = tag, item[len(tag) + 2:].strip()
+                break
+        gaps.append({"level": level, "text": item})
     return body, gaps
 
 
@@ -124,7 +137,9 @@ def write(job: dict[str, Any], guide: str, feedback: str = "") -> str:
 절대 규칙:
 - 가이드 §3 사실 저장소에 없는 수치·기술·프로젝트를 만들지 않는다.
 - 공고가 요구하는데 근거가 없는 항목은 지어내지 말고, 이력서 본문 뒤에
-  `## 대응 근거 없음` 섹션으로 따로 보고한다.
+  `## 대응 근거 없음` 섹션으로 따로 보고한다. 항목마다 공고에서 그것이
+  **필수요건이면 `- [필수]`**, 우대사항이면 `- [우대]` 로 시작한다.
+  이 구분은 자동지원 여부를 가르는 데 쓰이므로 공고 문구에 충실하게 판단한다.
 - 이력서 본문만 출력한다. 설명·머리말·코드펜스를 붙이지 않는다.
 
 # 작성 가이드
@@ -210,17 +225,28 @@ def build(
         path = RESUME_OUT_DIR / f"{job_id}-{safe}.md"
         path.write_text(body, encoding="utf-8")
 
+    # 필수요건인데 근거가 없는 항목이 쌓이면 자동지원하지 않는다.
+    #
+    # 실측(에프앤에프 Java/Spring, 132점 최고점): Java·Spring 실무, Oracle,
+    # ERP 전부 근거 없음이었다. 적합도 점수는 공고에 그 키워드가 있는지만 세고
+    # 사용자가 실제로 할 수 있는지와 대조하지 않아 과대평가된 것이다.
+    # 어셈블러가 공고를 읽으면서 만든 이 목록이 그 사각지대를 메운다.
+    required = [g for g in gaps if g["level"] == "필수"]
+    max_gaps = effective_config().get("applicability", {}).get("max_required_gaps", 2)
+    overqualified_gap = len(required) > max_gaps
+
     return {
         "job_id": job_id,
         "company": job["company"],
         "title": job["title"],
         "rounds": rounds,
-        "ok": not issues and not unverified,
+        "ok": not issues and not unverified and not overqualified_gap,
         "issues": issues,
         "unverified": unverified,
         # 공고가 요구하는데 사실 저장소에 근거가 없는 항목. 제출물엔 없다.
-        # 이게 많으면 적합도 점수가 과대평가됐다는 신호다 (아래 주석 참조).
         "gaps": gaps,
+        "required_gaps": len(required),
+        "blocked_by_gaps": overqualified_gap,
         "chars": len(body),
         "path": str(path) if path else None,
         "resume": body,

@@ -47,6 +47,29 @@ class ClaudeUnavailable(RuntimeError):
     pass
 
 
+class UsageLimited(RuntimeError):
+    """구독 사용 한도에 걸렸다. 재시도로 못 넘고, 시간이 지나야 풀린다.
+
+    이걸 일반 오류와 구분하는 이유: 한도는 **고장이 아니다.** 실패로 기록하고
+    자리를 붙잡아 두면 한도가 풀린 뒤에도 그 공고를 다시 못 건드린다.
+    오케스트레이터는 이 예외를 받으면 자리를 놓아주고 조용히 멈춘 뒤,
+    다음 스케줄 실행(새벽)에 이어서 한다.
+    """
+
+
+# claude CLI가 한도에 걸렸을 때 내는 문구들
+_LIMIT_MARKERS = (
+    "usage limit", "rate limit", "429",
+    "사용 한도", "한도에 도달", "limit reached", "quota",
+)
+
+
+def _raise_if_limited(text: str) -> None:
+    low = text.lower()
+    if any(m.lower() in low for m in _LIMIT_MARKERS):
+        raise UsageLimited(text.strip()[:300])
+
+
 def cli_available() -> bool:
     return shutil.which("claude") is not None
 
@@ -120,6 +143,9 @@ def ask(
             f"claude 호출이 {timeout}초 안에 끝나지 않았습니다. "
             "config.yaml의 llm.timeout_sec를 늘리거나 더 빠른 모델을 쓰세요."
         ) from exc
+
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    _raise_if_limited(combined)  # 한도는 고장이 아니다. 별도로 다룬다.
 
     if proc.returncode != 0:
         raise RuntimeError(

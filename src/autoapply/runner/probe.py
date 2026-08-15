@@ -55,17 +55,39 @@ def check_session(platform: str, *, headless: bool = False) -> bool | None:
     try:
         with browser(headless=headless) as s:
             s.goto(url)
-            s.page().wait_for_timeout(2500)
+            s.page().wait_for_timeout(3000)
 
-            # 로그인해야만 존재하는 요소를 본다. 실패 URL을 나열하는 방식보다
-            # 튼튼하다 — 새 리다이렉트가 생겨도 조용히 뚫리지 않는다.
-            if alive_sel:
-                alive = s.exists(alive_sel, timeout_ms=6000)
-            else:
-                alive = not re.search(dead, s.url())
+            # 1) 로그인 페이지로 튕겼으면 확실히 죽었다.
+            if dead and re.search(dead, s.url()):
+                log.info("%s 세션 죽음 — 로그인 페이지 (%s)", platform, s.url())
+                return False
 
-            log.info("%s 세션 %s (%s)", platform, "살아있음" if alive else "죽음", s.url())
-            return alive
+            # 2) 로그인 상태에서만 도달하는 URL이면 살아있다.
+            #
+            # DOM 셀렉터보다 이쪽을 먼저 본다. 원티드 /cv는 로그인이면 /cv/list로,
+            # 아니면 /cv/intro로 리다이렉트한다 — 렌더링 타이밍과 무관하게
+            # 결정되므로 느린 환경(launchd 콜드스타트)에서도 흔들리지 않는다.
+            alive_url = recipe.get("session_alive_url")
+            if alive_url and alive_url in s.url():
+                log.info("%s 세션 살아있음 (%s)", platform, s.url())
+                return True
+
+            # 3) 보조 신호 — 로그인해야만 존재하는 요소
+            if alive_sel and s.exists(alive_sel, timeout_ms=12000):
+                log.info("%s 세션 살아있음 — 요소 확인 (%s)", platform, s.url())
+                return True
+
+            # 4) 전부 아니면 **모르는 것**이지 죽은 게 아니다.
+            #
+            # 실측(2026-08-16 03시 스케줄 실행): 로그인이 멀쩡한데 launchd 환경에서
+            # 브라우저 콜드스타트가 느려 셀렉터를 제때 못 찾았고, 그걸 '죽음'으로
+            # 단정해 47건이 전부 LOGIN_REQUIRED로 막혔다. 증거의 부재를 부재의
+            # 증거로 다룬 셈이다. 모르면 모른다고 해야 판정이 오염되지 않는다.
+            log.warning(
+                "%s 세션 확인 불가 — 로그인 페이지도 아니고 기대 요소도 못 찾음 (%s)",
+                platform, s.url(),
+            )
+            return None
     except Exception as e:  # noqa: BLE001
         log.warning("%s 세션 확인 실패 — 판단 보류: %s", platform, e)
         return None
