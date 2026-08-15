@@ -254,6 +254,66 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> list[str]:
     return added
 
 
+# 링크 행 컨테이너. 클래스 대부분이 해시(wds-*)인데 이것만 의미 있는 이름이라
+# 안내 문구가 바뀌어도(빈 칸 → "GitHub") 계속 잡힌다.
+LINK_ACTIVATOR = ".link-view"
+LINK_NAME = 'input[placeholder*="링크명"]'
+LINK_URL = 'input[placeholder*="https://"]'
+
+
+def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
+    """링크(GitHub·포트폴리오)를 채운다.
+
+    링크 입력칸도 스킬처럼 처음엔 DOM에 없다. 안내 문구를 눌러야 나타나고,
+    그 문구는 오버레이에 덮여 있어 force 클릭이 필요하다. 스크롤을 먼저 하지
+    않으면 클릭이 화면 밖 좌표로 나가 아무 일도 일어나지 않는다.
+    """
+    added: list[str] = []
+    if not links:
+        return added
+
+    if not page.locator(LINK_NAME).count():
+        act = page.locator(LINK_ACTIVATOR).last
+        if not act.count():
+            log.warning("링크 행을 찾지 못했다")
+            return added
+        act.scroll_into_view_if_needed()
+        page.wait_for_timeout(600)
+        act.click(force=True)
+        page.wait_for_timeout(1800)
+
+    if not page.locator(LINK_NAME).count():
+        log.warning("링크 입력칸이 열리지 않았다")
+        return added
+
+    for link in links[:limit]:
+        name, url = (link.get("name") or "").strip(), (link.get("url") or "").strip()
+        if not (name and url):
+            continue
+        names, urls = page.locator(LINK_NAME), page.locator(LINK_URL)
+        # 마지막(빈) 칸에 넣는다. 앞칸은 이미 채워진 링크다.
+        idx = names.count() - 1
+        if idx < 0:
+            break
+        # 링크 칸은 오버레이에 덮여 있어 일반 클릭이 막힌다. force로 넣는다.
+        for sel, val in (
+            (f"{LINK_NAME} >> nth={idx}", name),
+            (f"{LINK_URL} >> nth={min(idx, max(urls.count() - 1, 0))}", url),
+        ):
+            box = page.locator(sel)
+            box.click(force=True)
+            box.fill(val)
+            box.press("Tab")
+            page.wait_for_timeout(400)
+        added.append(name)
+
+        add = page.locator('button:has-text("링크 추가")')
+        if add.count() and link is not links[:limit][-1]:
+            add.first.click(force=True)
+            page.wait_for_timeout(1200)
+    return added
+
+
 # YYYY.MM 버튼의 화면상 순서. 편집기 레이아웃이 고정이라 순번으로 잡는다.
 # (섹션 제목이 h2/h3가 아니어서 DOM으로 소속을 찾을 수 없다)
 DATE_SLOTS = {"exp_start": 0, "exp_end": 1, "edu_start": 4, "edu_end": 5}
@@ -303,7 +363,7 @@ def open_editor(s: PlaywrightSession, *, resume_url: str | None = None) -> str:
     return s.url()
 
 
-ALL_STEPS = ("text", "experience", "education", "dates", "selects", "skills")
+ALL_STEPS = ("text", "experience", "education", "dates", "selects", "skills", "links")
 
 
 def fill(
@@ -409,6 +469,7 @@ def fill(
             selects["졸업 상태"] = _set_select(p, "졸업 상태", "졸업")
 
         skills = _fill_skills(p, data.get("skills") or []) if "skills" in steps else []
+        links = _fill_links(p, data.get("links") or []) if "links" in steps else []
 
         p.wait_for_timeout(3000)  # 자동 저장이 붙을 시간
 
@@ -426,7 +487,7 @@ def fill(
             "url": url, "dry_run": False,
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
-            "dates": dates, "selects": selects, "skills": skills,
+            "dates": dates, "selects": selects, "skills": skills, "links": links,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
         }
