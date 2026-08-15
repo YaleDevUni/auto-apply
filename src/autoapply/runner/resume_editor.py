@@ -161,6 +161,20 @@ def _set_date(page, nth: int, value: str) -> bool:
         return False
     m.first.click()
     page.wait_for_timeout(900)
+
+    # 피커에 '확인' 버튼이 있으면 눌러야 커밋된다. 없는 피커도 있어 조건부다.
+    # 실측: 학력 종료일이 연·월을 골라도 이전 값(2026.08)에서 안 바뀌었고,
+    # _set_date는 True를 돌려주고 있었다 — 눌렀다고 반영된 게 아니다.
+    ok = dlg.locator('button:text-is("확인")')
+    if ok.count():
+        ok.first.click()
+        page.wait_for_timeout(900)
+
+    # 실제로 반영됐는지 대조한다. 반영 안 됐으면 True를 돌려주면 안 된다.
+    shown = _date_buttons(page).nth(nth).inner_text().strip()
+    if shown != f"{year}.{int(month):02d}":
+        log.warning("날짜가 반영되지 않았다: %s 기대 %s.%s", shown, year, month)
+        return False
     return True
 
 
@@ -316,7 +330,11 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
 
 # YYYY.MM 버튼의 화면상 순서. 편집기 레이아웃이 고정이라 순번으로 잡는다.
 # (섹션 제목이 h2/h3가 아니어서 DOM으로 소속을 찾을 수 없다)
-DATE_SLOTS = {"exp_start": 0, "exp_end": 1, "edu_start": 4, "edu_end": 5}
+DATE_SLOTS = {
+    "exp_start": 0, "exp_end": 1,
+    "ach_start": 2, "ach_end": 3,      # 주요 성과 기간
+    "edu_start": 4, "edu_end": 5,
+}
 
 
 # 자동완성이 붙은 필드. 일반 입력으로는 확정되지 않는다.
@@ -454,6 +472,11 @@ def fill(
                 dates["exp_start"] = _set_date(p, DATE_SLOTS["exp_start"], e0["start"])
             if e0.get("end"):
                 dates["exp_end"] = _set_date(p, DATE_SLOTS["exp_end"], e0["end"])
+            ach0 = (e0.get("achievements") or [{}])[0]
+            if ach0.get("start"):
+                dates["ach_start"] = _set_date(p, DATE_SLOTS["ach_start"], ach0["start"])
+            if ach0.get("end"):
+                dates["ach_end"] = _set_date(p, DATE_SLOTS["ach_end"], ach0["end"])
         if "dates" in steps and edus:
             d0 = edus[0]
             if d0.get("start"):

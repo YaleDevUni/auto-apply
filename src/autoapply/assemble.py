@@ -270,9 +270,12 @@ EDITOR_SCHEMA = """{
     {"company": "회사명", "job_role": "직무", "business_title": "직책",
      "start": "YYYY.MM", "end": "YYYY.MM",
      "achievements": [
-       {"title": "주요 성과 제목", "detail": "· 로 시작하는 불릿 2~4개. 마지막 줄은 '· 사용기술: A, B, C'"}
+       {"title": "주요 성과 제목",
+        "start": "YYYY.MM", "end": "YYYY.MM",
+        "detail": "· 로 시작하는 불릿 2~4개. 마지막 줄은 '· 사용기술: A, B, C'"}
      ]}
   ],
+  "_note_achievement_period": "achievements의 start/end는 그 프로젝트를 수행한 기간이며 반드시 소속 경력의 재직기간 안에 들어가야 한다. 가이드 §3에 기간이 적힌 항목은 그 값을 그대로 쓴다.",
   "educations": [
     {"school": "학교명", "major": "전공 및 학위", "start": "YYYY.MM", "end": "YYYY.MM",
      "detail": "이수 과목 또는 연구 내용"}
