@@ -265,7 +265,7 @@ def build(
 
 EDITOR_SCHEMA = """{
   "headline": "한 줄 타이틀 (공고에 맞춰 매번 다시 씀)",
-  "summary": "간단 소개. 400자 이상 600자 이내. 채용 담당자가 가장 먼저 읽는 글",
+  "summary": "간단 소개. 아래 형식을 정확히 지킨다.\n  · 첫 줄: 한 문장 요약 (무엇을 하는 개발자인가)\n  · 빈 줄 하나\n  · '· ' 로 시작하는 핵심역량 불릿 4개. 가이드 §2의 핵심역량 항목이 이것이다\n  · 각 불릿은 한 줄, 태도가 아니라 역량/경험 단위\n  전체 **450~600자**. 원티드가 400자 미만이면 이력서 완성도를 깎으므로 반드시 넘긴다. 줄바꿈(\\n)을 실제로 넣는다 — 한 문단으로 붙이지 않는다",
   "experiences": [
     {"company": "회사명", "job_role": "직무", "business_title": "직책",
      "start": "YYYY.MM", "end": "YYYY.MM",
@@ -296,6 +296,14 @@ def build_editor_json(
 가이드의 §1 처리 순서, §3 사실 저장소, §4 문장 규칙, §5 일관성 체크리스트,
 §6-1 AI 활용, §7 직무별 강조 우선순위를 적용한다.
 
+**문장 규칙(§4)은 모든 필드에 예외 없이 적용한다.** 특히:
+- 명사형 종결로 통일한다. `~했습니다 / ~있습니다` 를 쓰지 않는다.
+  ✅ `동시 충돌 리포트 월 10건 → 0건으로 감소`
+  ❌ `충돌을 0건으로 줄인 경험이 있습니다`
+- 주어를 생략한다. "저는" 을 쓰지 않는다.
+- 수치는 개선 전/후를 함께 쓴다.
+- 한 불릿에 한 가지만 담는다.
+
 절대 규칙:
 - §3 사실 저장소에 없는 수치·기술·프로젝트를 만들지 않는다.
 - 공고가 요구하는데 근거가 없는 항목은 `gaps`에 넣는다. 지어내지 않는다.
@@ -312,6 +320,7 @@ def build_editor_json(
 
     raw = llm.ask(prompt)
     data = _parse_json(raw)
+    _ensure_summary_length(data, job, guide)
 
     gaps = data.get("gaps") or []
     required = [g for g in gaps if g.get("level") == "필수"]
@@ -334,6 +343,52 @@ def build_editor_json(
         "path": str(path) if path else None,
         "data": data,
     }
+
+
+SUMMARY_MIN = 450
+
+
+def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str) -> None:
+    """간단 소개가 짧으면 **그 필드만** 다시 받는다.
+
+    원티드는 400자 미만이면 이력서 완성도를 깎는다. 그런데 프롬프트로 글자수를
+    지시해도 잘 안 지켜진다(실측: 450자를 요구했는데 314자). 지시를 더 세게 쓰는
+    대신 코드가 재고 모자라면 다시 받는다 — 이 프로젝트의 다른 검증들과 같은
+    방식이다.
+
+    전체를 다시 만들지 않는 이유: 출력 토큰에 시간이 선형이라 전체 재생성은
+    비싸다. v1이 자소서 한 건에 98초 걸린 원인이 그 통짜 재생성 루프였다.
+    """
+    summary = (data.get("summary") or "").strip()
+    if len(summary) >= SUMMARY_MIN:
+        return
+
+    log.info("간단 소개가 %d자 — %d자 이상으로 보강 요청", len(summary), SUMMARY_MIN)
+    out = llm.ask(
+        f"""아래 [현재 간단 소개]를 {SUMMARY_MIN}~600자로 늘려라.
+
+규칙:
+- 구조를 유지한다. 첫 줄 한 문장 요약 + 빈 줄 + `· ` 불릿 4개.
+- 불릿 개수를 늘리지 말고 **각 불릿의 내용을 구체화**한다
+  (맡은 범위, 사용 기술, 결과 수치).
+- [사실 저장소]에 없는 내용을 만들지 않는다.
+- 명사형 종결. `~습니다` 금지. 주어 생략.
+- 결과 텍스트만 출력한다. 설명·코드펜스 금지.
+
+# 현재 간단 소개
+{summary}
+
+# 사실 저장소
+{guide}
+
+# 채용공고
+{_jd_block(job)}"""
+    ).strip()
+
+    if SUMMARY_MIN <= len(out) <= 900:
+        data["summary"] = out
+    else:
+        log.warning("보강 결과가 %d자 — 원문을 유지한다", len(out))
 
 
 def _parse_json(raw: str) -> dict[str, Any]:
