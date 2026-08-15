@@ -1,0 +1,43 @@
+{
+  "platform": "wanted",
+  "version": 1,
+  "_note": [
+    "실측(2026-08-15, 공고 375357)으로 확인한 원티드 지원 폼.",
+    "예상과 달랐던 점 세 가지:",
+    "  1. 지원 패널은 공고마다 열려 있기도 하고(375357) 버튼을 눌러야 하기도 한다(이빗).",
+    "     그래서 클릭은 optional로 둔다 — 없으면 건너뛰고, 있으면 누른다.",
+    "  2. 이름/이메일/연락처가 계정에서 자동으로 채워진다. fill 스텝이 필요없다.",
+    "  3. 자소서 문항이 없다. 이력서는 플랫폼에 저장된 것을 고른다 — 업로드도 없다.",
+    "결국 실제 동작은 '이력서 체크 → 제출' 둘뿐이다.",
+    "",
+    "셀렉터는 data-attribute-id를 쓴다. 클래스명(Applying_footer__applyButton__eUQSq)은",
+    "CSS 모듈 해시라 배포 때마다 바뀐다 — 레시피가 조용히 깨지는 가장 흔한 원인이다."
+  ],
+  "login_dead_pattern": "id\\.wanted\\.co\\.kr|/login|/signup",
+  "steps": [
+    { "do": "goto", "url": "{job.url}" },
+
+    { "do": "click", "sel": "button:has-text(\"지원하기\") >> nth=0", "optional": true,
+      "timeout_ms": 5000,
+      "_why": "패널을 여는 것뿐이라 되돌릴 수 있다. 이미 열려 있으면 버튼이 없으므로 건너뛴다" },
+
+    { "do": "expect", "sel": "#name", "timeout_ms": 15000,
+      "_why": "지원 패널이 떴다는 신호. 로그인이 풀렸으면 여기서 멈춘다" },
+
+    { "do": "check",
+      "sel": "li:has(span:text-is(\"{job.resume}\")) input[type=checkbox][id^=\"resume-\"]",
+      "_why": "트랙에 맞는 이력서를 제목으로 정확히 고른다. nth=0(첫 번째)은 쓰면 안 된다 — 목록이 수정일 내림차순이라 순서가 바뀌고, '작성 중'인 미완성 이력서가 위로 올라올 수 있다. text-is는 완전일치라 '...사본'을 잘못 집지 않는다" },
+
+    { "do": "expect", "sel": "[data-attribute-id=\"apply__done__net\"]:not([disabled])",
+      "timeout_ms": 8000,
+      "_why": "이력서를 골라야 제출 버튼이 활성화된다. 비활성이면 체크가 실패한 것이므로 여기서 멈춘다 — 플랫폼이 만들어준 공짜 안전장치다" },
+
+    { "do": "submit", "sel": "[data-attribute-id=\"apply__done__net\"]" }
+  ],
+  "success_any": [
+    "text=지원이 완료",
+    "text=지원 완료",
+    "text=지원해주셔서",
+    "text=지원서가 전달"
+  ]
+}
