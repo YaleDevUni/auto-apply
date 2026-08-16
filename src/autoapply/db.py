@@ -252,6 +252,14 @@ CREATE TABLE IF NOT EXISTS resume_builds (
     track         TEXT,                      -- 어느 트랙에 맞춰 썼는지
     headline      TEXT,                      -- 한 줄 타이틀 (적합도 비교용)
     skills        TEXT NOT NULL DEFAULT '[]',-- 실제로 등록된 스킬
+    -- 이 공고가 어디까지 갔나. 다음 실행이 여기서 이어받는다 (assemble.progress).
+    --   assembled   조립 완료 (LLM 결과 있음)
+    --   filling     이력서를 채우는 중 — 끊기면 절반만 채워진 것이 남을 수 있다
+    --   registered  이력서 등록 완료. 플랫폼에 완성된 이력서가 실제로 있다
+    --   prepared    지원 폼까지 채우고 스크린샷 — 사람 승인 대기
+    stage         TEXT,
+    stage_at      TEXT,
+    stage_error   TEXT,
     built_at      TEXT NOT NULL
 );
 
@@ -471,6 +479,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         # 공고에 맞춰 에이전트가 고른 포트폴리오 제목(원티드 표기 그대로, NFC).
         # resume_title과 같은 자리에 둔다 — 지원 단계가 여기서 읽어 레시피에 넘긴다.
         "portfolio_title": "TEXT",
+        # 어디까지 갔나. 중단·고장 뒤에 처음부터 다시 하지 않기 위한 것이다.
+        "stage": "TEXT",
+        "stage_at": "TEXT",
+        "stage_error": "TEXT",
     },
 }
 

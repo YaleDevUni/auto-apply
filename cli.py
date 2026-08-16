@@ -283,7 +283,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         try:
             rows = conn.execute(
                 """SELECT b.job_id, j.company, b.resume_title, b.completeness,
-                          b.required_gaps, b.fill_report, b.built_at
+                          b.required_gaps, b.fill_report, b.built_at,
+                          b.stage, b.stage_at, b.stage_error
                    FROM resume_builds b LEFT JOIN jobs j ON j.id = b.job_id
                    ORDER BY b.built_at DESC LIMIT ?""",
                 (args.limit,),
@@ -295,6 +296,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             rep = json.loads(r["fill_report"] or "{}")
             out.append({
                 "job_id": r["job_id"], "회사": r["company"],
+                # 어디까지 갔나. 'filling'이 남아 있으면 채우다 끊긴 것이라
+                # 다음 실행이 그 이력서를 버리고 새로 만든다.
+                "단계": r["stage"], "단계시각": r["stage_at"],
+                **({"단계오류": r["stage_error"][:120]} if r["stage_error"] else {}),
                 "이력서": r["resume_title"], "완성도": r["completeness"],
                 "필수미충족": r["required_gaps"],
                 "저장안됨": rep.get("lost") or [],
@@ -632,10 +637,11 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
             # 쌓이는 이력서는 `resumes --cleanup`이 치운다 —
             # `made_resumes`에 우리가 만든 것이 남으므로 근거가 있다.
             r = _autoapply(t["job_id"], resume_url=None, live=False)
-        except tasks.Cancelled:
+        except tasks.Cancelled as e:
             # 사람이 멈춘 것을 한 공고의 실패로 삼키면 다음 공고로 넘어간다 —
             # 멈추라고 한 사람 눈에는 그게 "안 멈춘다"다. 위로 올려 최상단이
             # "⏹ 중단"으로 답하게 한다.
+            _note_stage_failure(t["job_id"], f"중단: {e}")
             raise
         except (llm.UsageLimited, llm.LoginExpired, llm.ClaudeUnavailable):
             # **다음 공고로 넘어가지 않는다.** 이력서는 LLM 없이 못 만들므로
@@ -648,6 +654,10 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
             raise
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
+            # 어느 단계에서 죽었는지를 남긴다. 다음 실행이 이어받을지 말지를
+            # stage로 정하므로, 실패 사유가 그 옆에 붙어 있어야 "왜 여기서
+            # 이어받는가"를 사람이 읽을 수 있다.
+            _note_stage_failure(t["job_id"], r["error"])
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
         _report_prepared(t, r, defer=defer)
     # prepared는 "몇 건을 손댔나"이지 "몇 건이 준비됐나"가 아니다 — night-cycle이
@@ -657,6 +667,17 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
         "already_applied": sum(1 for r in out if r.get("already_applied")),
         "items": out,
     }
+
+
+def _note_stage_failure(job_id: int, error: str) -> None:
+    """단계 실패 기록은 절대 지원준비를 막지 않는다 — 기록하다 죽으면
+    원래 실패가 무엇이었는지가 통째로 사라진다."""
+    try:
+        from src.autoapply import assemble
+
+        assemble.note_failure(job_id, error)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).debug("단계 실패 기록 실패(무시): %s", e)
 
 
 def _queue_notification(
@@ -914,7 +935,10 @@ def _revise(job_id: int, feedback: str) -> dict:
               "<i>수정 요청이 사실 저장소에 없는 내용을 요구했을 수 있습니다.</i>")
         return {"stopped": "재작성 후에도 필수요건 미충족", "gaps": built["required_gaps"]}
 
-    result = _autoapply(job_id, resume_url=None, live=False)
+    # **이어받지 않는다.** 재작성은 "이번엔 다르게 써 달라"는 요청이므로,
+    # 지난번에 등록해둔 이력서를 재사용하면 지시가 통째로 무시된 채 옛 이력서가
+    # "재작성됨"으로 폰에 다시 올라간다 — 사람은 고쳐진 줄 알고 승인한다.
+    result = _autoapply(job_id, resume_url=None, live=False, reuse=False)
     target = _job(job_id)
     target["fit_score"] = target.get("fit_score") or 0
     _report_prepared(
@@ -1077,7 +1101,7 @@ def _resume_title(job: dict) -> str:
     return name[:50]
 
 
-def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
+def _autoapply(job_id: int, *, resume_url: str | None, live: bool, reuse: bool = True) -> dict:
     """조립 → 등록 → 지원. 각 단계가 다음 단계의 입력을 만든다.
 
     이력서 제목이 고리다. 편집기에 채운 뒤 그 제목을 읽어 지원 레시피에 넘기므로,
@@ -1105,6 +1129,30 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     if already:
         return already
 
+    # 지난번에 어디까지 갔나. 끊긴 자리에서 이어받는다 — 처음부터 다시 하면
+    # 조립(LLM)을 또 하고, 더 나쁘게는 **같은 공고용 이력서를 하나 더 만든다.**
+    # 자세한 재사용 규칙은 assemble.progress의 주석에 있다.
+    prog = assemble.progress(job_id) if reuse else {"resumable": False}
+    if prog["resumable"]:
+        log = logging.getLogger(__name__)
+        log.info("공고 %s — %s 단계에서 이어받는다 (이력서 %r 재사용, 새로 안 만든다)",
+                 job_id, prog["stage"], prog["resume_title"])
+        tasks.check("지원 폼 진입 전")
+        job = _job(job_id, resume_title=prog["resume_title"], require_resume=True)
+        with browser_lock("지원준비", label=f"공고 {job_id}"):
+            result = _apply_with(job, live=live)
+        assemble.set_stage(job_id, "prepared")
+        reg = assemble.registration(job_id)
+        return {
+            "company": _job(job_id).get("company"),
+            "이어받음": prog["stage"],
+            "resume": {"title": prog["resume_title"], "url": prog["resume_url"],
+                       "shot": None, "skills": len(json.loads(reg.get("skills") or "[]")
+                                                   if isinstance(reg.get("skills"), str)
+                                                   else reg.get("skills") or [])},
+            "apply": result,
+        }
+
     tasks.check("이력서 조립 전")
     built = assemble.build_editor_json(job_id)
     if not built["ok"]:
@@ -1129,6 +1177,11 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     # 편집기는 자동저장이라 중간에 끊으면 절반만 채워진 이력서가 계정에
     # 남고, 그건 안 만드느니만 못하다. 그래서 들어가기 전에 마지막으로 묻는다.
     tasks.check("이력서 등록 전")
+    assemble.set_stage(job_id, "assembled")
+    # `filling`은 **시작할 때** 적는다. 다른 단계와 반대인데, 이유는 채우다
+    # 끊긴 이력서를 다음 실행이 재사용하면 절반짜리가 그대로 나가기 때문이다.
+    # 끝난 뒤에 적으면 "채우다 죽었다"가 아무 데도 안 남는다.
+    assemble.set_stage(job_id, "filling")
     with browser_lock("지원준비", label=f"공고 {job_id}"):
         filled = resume_editor.fill(
             built["data"], resume_url=resume_url,
@@ -1146,12 +1199,16 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
             resume_url=filled.get("url", ""), skills=filled.get("skills") or [],
             report=resume_editor.fill_report(filled),
         )
+        # 여기까지 왔으면 플랫폼에 **완성된** 이력서가 실제로 있다. 이 뒤에
+        # 무엇이 죽어도 다음 실행은 이걸 재사용하고 새로 만들지 않는다.
+        assemble.set_stage(job_id, "registered")
 
         # 이력서는 이미 만들어져 등록됐다. 여기서 접어도 반쯤 만든 것은
         # 안 남는다 — 지원 폼은 dry-run이라 바깥세상에 아무것도 안 낸다.
         tasks.check("지원 폼 진입 전")
         job = _job(job_id, resume_title=title, require_resume=True)
         result = _apply_with(job, live=live)
+    assemble.set_stage(job_id, "prepared")
     return {
         "company": built["company"],
         # shot은 원티드 편집기 화면을 새로고침(=저장 확인) 후 찍은 실물 사진이다

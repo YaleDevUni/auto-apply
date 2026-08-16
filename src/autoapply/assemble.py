@@ -910,6 +910,114 @@ def verify_screenshot(shot: str, data: dict[str, Any]) -> dict[str, Any]:
     return vision.verify(shot, intent, context="채용 플랫폼의 이력서 편집 화면")
 
 
+# 지원준비 한 건이 지나는 단계. 순서가 곧 진행도다 — 뒤엣것에 도달했으면
+# 앞엣것은 다 끝난 것이다.
+STAGES = ("assembled", "filling", "registered", "prepared")
+
+
+def set_stage(
+    job_id: int, stage: str, *, error: str = "", conn: sqlite3.Connection | None = None
+) -> None:
+    """이 공고가 어디까지 갔는지 적는다.
+
+    **단계를 마친 직후에** 적는다. 시작할 때 적으면 "끝났다"와 "하다 죽었다"가
+    같은 값으로 남아, 다음 실행이 안 끝난 일을 끝난 것으로 읽는다. 유일한
+    예외가 `filling`인데, 그건 일부러 **시작할 때** 적는다 — 채우다 끊긴 이력서를
+    다음 실행이 재사용하면 절반짜리가 그대로 나가기 때문이다(아래 progress 참고).
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        conn.execute(
+            "UPDATE resume_builds SET stage=?, stage_at=?, stage_error=? WHERE job_id=?",
+            (stage, now(), error[:500], job_id),
+        )
+        conn.commit()
+    finally:
+        if own:
+            conn.close()
+
+
+def note_failure(job_id: int, error: str, conn: sqlite3.Connection | None = None) -> None:
+    """왜 여기서 멈췄는지만 적는다. **단계는 안 옮긴다.**
+
+    실패했다고 stage를 뒤로 되돌리거나 앞으로 밀면 안 된다 — 다음 실행이
+    "어디까지 실제로 끝냈나"를 그 값으로 판단하기 때문이다. 실패는 진행이
+    아니라 진행에 붙는 메모다.
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        conn.execute(
+            "UPDATE resume_builds SET stage_at=?, stage_error=? WHERE job_id=?",
+            (now(), (error or "")[:500], job_id),
+        )
+        conn.commit()
+    except Exception as e:  # noqa: BLE001
+        log.debug("단계 실패 기록 실패(무시): %s", e)
+    finally:
+        if own:
+            conn.close()
+
+
+def progress(job_id: int, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """어디서 이어받을지 정하는 데 필요한 것만 낸다.
+
+    ## 왜 이어받나
+
+    예전에는 실패하거나 중단되면 그냥 **다음 공고로 넘어갔고**, 같은 공고를
+    다시 잡으면 이력서 조립(LLM 1~2회)부터 통째로 다시 했다. 더 나쁜 건
+    등록까지 끝난 뒤에 끊긴 경우다 — 다시 하면 사본에서 **새 이력서를 또
+    만든다.** 계정에 같은 공고용 이력서가 두 개 쌓이고, 어느 것이 나갈지
+    지원 폼에서 알 수 없게 된다.
+
+    ## 무엇을 재사용하고 무엇을 버리나
+
+        registered  재사용한다. 완성된 이력서가 플랫폼에 실제로 있다.
+        prepared    (같다)
+                    fill()을 **다시 부르지 않는다** — 사본 스킬 채우기는
+                    "비어 있다"를 전제로 추가만 하므로(prune 없음), 이미
+                    채워진 이력서를 다시 채우면 스킬이 두 번 들어간다.
+
+        filling     버린다. 채우다 끊긴 이력서라 절반만 채워져 있을 수 있고,
+                    그게 그대로 제출되는 것이 이 파이프라인 최악의 결과다.
+                    새로 만든다 — 버려지는 이력서는 made_resumes에 남아
+                    `resumes --cleanup`이 치운다(만들자마자 적으므로 채우다
+                    실패한 것도 우리 것으로 잡힌다).
+
+        assembled   조립 결과는 어차피 72시간 캐시(_load_cached)가 재사용한다.
+                    여기서 따로 할 일은 없다.
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        row = conn.execute(
+            "SELECT stage, stage_at, stage_error, resume_title, resume_url "
+            "FROM resume_builds WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return {"stage": "", "resume_title": "", "resume_url": "", "resumable": False}
+        stage = row["stage"] or ""
+        # 제목이 없으면 등록됐다고 볼 수 없다. 지원 단계가 그 제목으로 이력서를
+        # 고르므로, 표식만 있고 제목이 없으면 이어받아도 무엇을 낼지 모른다.
+        # prepared도 재사용한다. 지원 폼까지 갔다는 것은 이력서가 **완성된 채로**
+        # 플랫폼에 있다는 뜻이다 — 다시 부르면 폼과 스크린샷만 새로 만들면 되고,
+        # 이력서를 또 만들 이유가 없다.
+        resumable = stage in ("registered", "prepared") and bool(row["resume_title"])
+        return {
+            "stage": stage,
+            "stage_at": row["stage_at"] or "",
+            "stage_error": row["stage_error"] or "",
+            "resume_title": row["resume_title"] or "",
+            "resume_url": row["resume_url"] or "",
+            "resumable": resumable,
+        }
+    finally:
+        if own:
+            conn.close()
+
+
 def registered_title(job_id: int, conn: sqlite3.Connection | None = None) -> str:
     """이 공고로 등록해둔 이력서 제목. 없으면 빈 문자열."""
     own = conn is None
