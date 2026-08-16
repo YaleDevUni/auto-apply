@@ -34,6 +34,7 @@ from typing import Any
 
 from . import llm
 from . import portfolio as portfolio_match
+from . import tasks
 from .config import effective_config
 from .db import connect, now
 from .paths import RESUME_OUT_DIR, RESUME_SRC_DIR, REVISION_LOG
@@ -628,6 +629,10 @@ def build_editor_json(
     data = _parse_json(raw)
     _strip_reasoning(data)
     _drop_manual_fields(data)
+    # 보강도 LLM 호출이다(llm.timeout_sec 기본 900초). 여기서 한 번 더 보면
+    # /stop이 최대 15분을 덜 기다린다. 아직 아무것도 저장하지 않았으므로
+    # 접어도 남는 것이 없다.
+    tasks.check("이력서 조립 중")
     _ensure_summary_length(data, job, guide)
     _strip_reasoning(data)  # 보강 응답에도 섞일 수 있다
 

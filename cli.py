@@ -632,6 +632,11 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
             # 쌓이는 이력서는 `resumes --cleanup`이 치운다 —
             # `made_resumes`에 우리가 만든 것이 남으므로 근거가 있다.
             r = _autoapply(t["job_id"], resume_url=None, live=False)
+        except tasks.Cancelled:
+            # 사람이 멈춘 것을 한 공고의 실패로 삼키면 다음 공고로 넘어간다 —
+            # 멈추라고 한 사람 눈에는 그게 "안 멈춘다"다. 위로 올려 최상단이
+            # "⏹ 중단"으로 답하게 한다.
+            raise
         except (llm.UsageLimited, llm.LoginExpired, llm.ClaudeUnavailable):
             # **다음 공고로 넘어가지 않는다.** 이력서는 LLM 없이 못 만들므로
             # 다음 공고도 같은 자리에서 죽는다. 여기서 삼켜 한 건의 실패로
@@ -1089,10 +1094,18 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     # 무엇보다 먼저 "여기 이미 냈나"를 본다. 아래 조립은 LLM 3~4회에 수 분이
     # 걸리는데, 이미 지원한 자리면 그게 전부 버려진다(지원 폼에서야 막힌다).
     # 페이지 한 번 여는 값으로 그걸 다 아낀다.
+    # 중단 표시를 **단계 경계마다** 본다. 예전에는 night-cycle의 while 루프
+    # 꼭대기에서만 봤다 — 한 건이 조립(LLM)과 등록(브라우저)까지 묶여 있어
+    # /stop을 눌러도 수 분 뒤에야 멈췄고, 사람 눈에는 "안 먹는다"로 보였다
+    # (실측 2026-08-17: cancel_at 07:00:40 → 실제 종료 07:01:44).
+    #
+    # 여기서 접어도 남는 것이 없다: 아직 브라우저에 아무것도 안 썼다.
+    tasks.check("지원준비 시작 전")
     already = _skip_if_already_applied(job_id)
     if already:
         return already
 
+    tasks.check("이력서 조립 전")
     built = assemble.build_editor_json(job_id)
     if not built["ok"]:
         return {
@@ -1112,6 +1125,10 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     # 만들어둔 채 다른 작업이 탭을 가져가고, 돌아왔을 땐 지원 폼이 아닌 화면에서
     # 셀렉터를 찾다 타임아웃으로 죽는다. 아래 fill/apply의 browser()는 같은
     # 프로세스라 재진입으로 그냥 통과한다.
+    # **여기가 마지막 안전 경계다.** fill() 안에서는 중단을 안 본다 —
+    # 편집기는 자동저장이라 중간에 끊으면 절반만 채워진 이력서가 계정에
+    # 남고, 그건 안 만드느니만 못하다. 그래서 들어가기 전에 마지막으로 묻는다.
+    tasks.check("이력서 등록 전")
     with browser_lock("지원준비", label=f"공고 {job_id}"):
         filled = resume_editor.fill(
             built["data"], resume_url=resume_url,
@@ -1130,6 +1147,9 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
             report=resume_editor.fill_report(filled),
         )
 
+        # 이력서는 이미 만들어져 등록됐다. 여기서 접어도 반쯤 만든 것은
+        # 안 남는다 — 지원 폼은 dry-run이라 바깥세상에 아무것도 안 낸다.
+        tasks.check("지원 폼 진입 전")
         job = _job(job_id, resume_title=title, require_resume=True)
         result = _apply_with(job, live=live)
     return {
