@@ -49,7 +49,8 @@ HELP = (
     "/blocked 막힌 이유\n"
     "/targets 지원 대기열\n"
     "/running 지금 도는 작업 (브라우저를 누가 쥐고 있는지도)\n"
-    "/stop    도는 작업 중단 요청 (안 멈추면 <code>/stop 강제</code>)\n"
+    "/stop    도는 작업 중단 요청. 하나만: <code>/stop 수집</code> · "
+    "안 멈추면 <code>/stop 강제</code>\n"
     "/pause   자동지원 정지 (도는 작업은 안 건드림 — 그건 /stop)\n"
     "/resume  재개\n"
     "/queue   개발 지시 큐\n\n"
@@ -172,11 +173,25 @@ def _cmd_stop(conn: sqlite3.Connection, rest: str) -> str:
 
     그래도 안 멈추면 `/stop 강제` — SIGTERM을 보낸다. 그 자리에서 끊기므로
     만들다 만 이력서가 남을 수 있다.
-    """
-    from ..tasks import describe, request_stop
 
-    force = rest.strip() in ("강제", "force", "kill", "-f")
-    stopped = request_stop(conn, force=force)
+    **무엇을 멈출지 고를 수 있다.** `/stop 수집`, `/stop 지원준비`, `/stop 12`.
+    수집(수십 분)과 지원준비는 같이 도는 일이 잦아서, 하나를 접으려다 둘 다
+    날리면 다시 수십 분이다 — 실제로 두 번 그렇게 날렸다. 인자가 없으면
+    전부지만, 그때는 무엇을 멈췄는지 목록으로 되돌려준다.
+    """
+    from ..tasks import describe, request_stop, select
+
+    words = rest.split()
+    force = any(w in ("강제", "force", "kill", "-f") for w in words)
+    match = " ".join(w for w in words if w not in ("강제", "force", "kill", "-f")).strip()
+
+    if match and not select(conn, match):
+        return (
+            f"'{html.escape(match)}'에 해당하는 작업이 없습니다.\n"
+            "<code>/running</code>으로 지금 도는 것을 먼저 보세요."
+        )
+
+    stopped = request_stop(conn, force=force, match=match)
     if not stopped:
         return "도는 작업이 없습니다. (<code>/pause</code>는 자동지원 자체를 멈춥니다)"
 
@@ -189,7 +204,8 @@ def _cmd_stop(conn: sqlite3.Connection, rest: str) -> str:
     return (
         f"⏹ <b>중단을 요청했습니다</b> ({len(stopped)}건)\n{lines}\n\n"
         "<i>지금 하던 한 건을 끝내고 멈춥니다. 받은 데까지는 저장됩니다.\n"
-        "안 멈추면 <code>/stop 강제</code>.</i>"
+        "안 멈추면 <code>/stop 강제</code>. 하나만 멈추려면 "
+        "<code>/stop 수집</code>처럼 종류나 번호를 붙이세요.</i>"
     )
 
 
@@ -251,6 +267,7 @@ def _cmd_guide(conn: sqlite3.Connection, rest: str) -> str:
         argv += [rest]
     subprocess.Popen(
         argv, cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
 
     if clear_session:
@@ -340,6 +357,7 @@ def _cmd_apply_start(conn: sqlite3.Connection, rest: str) -> str:
     subprocess.Popen(
         [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "night-cycle", "--target", str(target)],
         cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
     return (
         f"🚀 지원 준비를 시작합니다 — 목표 {target}건.\n"
@@ -362,6 +380,7 @@ def _cmd_improve(conn: sqlite3.Connection, rest: str) -> str:
     subprocess.Popen(
         [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "improve", "--limit", "1"],
         cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
     return "🔧 자기개선을 시작합니다 — 전용 브랜치에서 작업하고 끝나면 알려드립니다."
 
@@ -543,6 +562,7 @@ def _start_revision(conn: sqlite3.Connection, job_id: str, feedback: str) -> Non
         cwd=str(CODE_ROOT),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
 
 
@@ -611,6 +631,7 @@ def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
             cwd=str(CODE_ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("제출 실행 실패: %s", e)

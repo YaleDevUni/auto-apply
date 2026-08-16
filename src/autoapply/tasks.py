@@ -174,9 +174,30 @@ def active(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return live
 
 
-def request_stop(conn: sqlite3.Connection, *, force: bool = False) -> list[dict[str, Any]]:
-    """도는 작업 전부에 중단을 요청한다. force면 신호까지 보낸다."""
-    tasks = active(conn)
+def select(conn: sqlite3.Connection, match: str = "") -> list[dict[str, Any]]:
+    """중단 대상을 고른다. match가 비면 전부.
+
+    고를 수 있어야 하는 이유: 수집(수십 분)과 지원준비는 같이 도는 일이 잦고,
+    지원준비 하나를 접으려다 수집까지 날리면 다시 수십 분이다. 실제로 그렇게
+    두 번 날렸다.
+
+    id(숫자)와 종류(부분 문자열) 둘 다 받는다 — 폰에서 치기엔 '수집'이 편하고,
+    같은 종류가 둘 돌 때는 id가 필요하다.
+    """
+    rows = active(conn)
+    m = match.strip()
+    if not m:
+        return rows
+    if m.isdigit():
+        return [r for r in rows if r["id"] == int(m)]
+    return [r for r in rows if m in (r["kind"] or "") or m in (r["label"] or "")]
+
+
+def request_stop(
+    conn: sqlite3.Connection, *, force: bool = False, match: str = ""
+) -> list[dict[str, Any]]:
+    """고른 작업에 중단을 요청한다. force면 신호까지 보낸다."""
+    tasks = select(conn, match)
     if not tasks:
         return []
     conn.executemany(
@@ -188,14 +209,42 @@ def request_stop(conn: sqlite3.Connection, *, force: bool = False) -> list[dict[
     for t in tasks:
         if not force:
             continue
-        # SIGTERM만 쓴다. SIGKILL은 finally조차 못 돌아 브라우저 잠금 표식과
-        # 반쯤 만진 이력서가 그대로 남는다.
-        try:
-            os.kill(t["pid"], signal.SIGTERM)
-            log.warning("작업 %s(pid %s)에 SIGTERM", t["kind"], t["pid"])
-        except Exception as e:  # noqa: BLE001
-            log.warning("SIGTERM 실패 pid %s: %s", t["pid"], e)
+        _terminate(int(t["pid"]), t["kind"])
     return tasks
+
+
+def _terminate(pid: int, kind: str = "") -> None:
+    """작업 하나를 끊는다. **프로세스 그룹째** 보낸다.
+
+    자식까지 가야 하는 이유: 자기개선은 `claude` CLI를, 수집은 아무것도 안
+    띄우지만 앞으로 늘 수 있다. 부모만 죽이면 자식이 고아로 남아 계속 돌고,
+    그건 "멈췄다"고 말한 뒤에도 일이 진행되는 최악의 상태다.
+
+    그룹으로 보내도 안전한 이유: 텔레그램 리스너가 띄우는 모든 작업은
+    `start_new_session=True`로 자기 그룹을 갖는다. 그게 아니라면 리스너와
+    같은 그룹이라 리스너까지 죽는다 — 그래서 **내 그룹이면 보내지 않는다.**
+
+    SIGKILL은 안 쓴다. finally조차 못 돌면 브라우저 잠금 표식과 반쯤 만진
+    이력서가 그대로 남는다.
+    """
+    try:
+        pgid = os.getpgid(pid)
+    except Exception:  # noqa: BLE001
+        pgid = None
+
+    if pgid is not None and pgid != os.getpgid(0) and pgid == pid:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            log.warning("작업 %s(pgid %s)에 SIGTERM — 자식까지", kind, pgid)
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning("killpg 실패 pgid %s: %s — 단일 pid로 재시도", pgid, e)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        log.warning("작업 %s(pid %s)에 SIGTERM", kind, pid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("SIGTERM 실패 pid %s: %s", pid, e)
 
 
 def describe(task: dict[str, Any]) -> str:
