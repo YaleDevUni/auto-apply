@@ -797,11 +797,38 @@ def _apply_with(job: dict, *, live: bool, headless: bool = False) -> dict:
     if result["submitted"]:
         agent.mark_submitted(ledger, evidence_path=result["evidence"])
         _notify_submitted(job, result)
+        _delete_submitted_resume(job_id, job.get("resume") or "")
     else:
         # 눌렀는데 완료 화면을 못 봤다. 실제로 접수됐을 수 있으므로 자리를 놓지 않는다.
         agent.mark_failed(ledger, result["error"] or "제출 확인 실패", release=False)
     result["ledger"] = ledger
     return result
+
+
+def _delete_submitted_resume(job_id: int, title: str) -> None:
+    """제출 직후 그 이력서를 플랫폼에서 지운다. 지원이력에서 여전히 접근
+    가능하므로 목록에 남겨둘 이유가 없다 — 남겨두면 max_keep을 금방 채운다.
+
+    로컬 사본이 있을 때만 지운다. 없으면 그게 유일한 기록이라
+    `resume_editor.cleanup()`과 같은 규칙으로 건드리지 않는다. 실패해도 지원
+    자체는 이미 끝났으므로 흐름을 막지 않는다 — 다음 `resumes --cleanup`이
+    나이·개수 기준으로 결국 치운다.
+    """
+    from src.autoapply.paths import RESUME_OUT_DIR
+
+    log = logging.getLogger(__name__)
+    if not title:
+        return
+    if not list(RESUME_OUT_DIR.glob(f"{job_id}-*.json")):
+        log.info("로컬 사본이 없어 제출 이력서를 남겨둔다: %s", title)
+        return
+    try:
+        from src.autoapply.runner import resume_editor
+
+        deleted = resume_editor.delete_after_submit(title)
+        log.info("제출 이력서 삭제 %s: %s", "성공" if deleted else "실패", title)
+    except Exception as e:  # noqa: BLE001
+        log.warning("제출 이력서 삭제 실패(무시, 다음 정리가 치운다): %s", e)
 
 
 if __name__ == "__main__":

@@ -1582,6 +1582,21 @@ def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
                 "우리 것 아님(건너뜀)": skipped_not_ours}
 
 
+def delete_after_submit(title: str, *, headless: bool = False) -> bool:
+    """제출 직후 그 이력서를 지운다. 플랫폼 지원이력에서 여전히 접근 가능하므로
+    목록에 남겨둘 이유가 없다.
+
+    `cleanup()`처럼 나이·개수로 고르지 않는다 — 방금 제출한 그 제목 하나만
+    지운다. 호출부(`cli.py`)가 로컬 사본이 있는지 먼저 확인하고 부른다;
+    여기서는 판단하지 않는다(`delete_resume`와 같은 원칙).
+    """
+    with browser(headless=headless) as s:
+        s.goto(_sel("url", CV_URL))
+        page = s.page()
+        page.wait_for_timeout(5500)
+        return delete_resume(page, title)
+
+
 def list_resumes_on(page) -> list[dict[str, str]]:
     """열려 있는 목록 페이지에서 이력서를 읽는다(브라우저를 새로 띄우지 않는다)."""
     body = page.inner_text("body")
