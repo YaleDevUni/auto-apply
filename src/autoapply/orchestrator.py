@@ -783,29 +783,54 @@ def execute(conn: sqlite3.Connection | None = None, plan_id: int = 0) -> dict[st
 def _land(
     conn: sqlite3.Connection, row: sqlite3.Row, origin: str, branch: str
 ) -> dict[str, Any]:
-    """커밋된 수정을 어디에 착지시킬지 정한다. main이냐 브랜치냐."""
+    """커밋된 수정을 어디에 착지시킬지 정한다. main이냐 브랜치냐.
+
+    main으로 가는 길은 둘이다:
+
+        low 자동   위험도 low + 검증 명령 실제 통과 + 결정론 관문 통과
+        사람 승인  row["status"]=="approved" — 폰에서 ✅를 눌렀다
+
+    사람 승인 뒤에도 브랜치에만 남기고 또 `git merge`를 기다리던 예전 방식은
+    이중 관문이었다 — 승인이 이미 "이 수정을 반영해라"라는 결정인데, 그 결정을
+    실제로 반영하는 손동작만 사람에게 남겨둔 것이다. 이제 승인되면 그 자리에서
+    main까지 간다. 단, 결정론 관문(`_auto_gate`)은 승인 여부와 무관하게
+    **무조건** 건다 — 사람은 계획 **문구**를 승인했을 뿐 diff를 본 게 아니라서,
+    지원·중복·한도 방어선은 그대로 지켜야 한다. 방어선에 걸리면 강등이고,
+    강등된 계획도 다시 승인하면(재시도) 여기를 다시 탄다.
+    """
     diff = _git("show", "HEAD", "--unified=0")
     stat = _git("show", "--stat", "--oneline", "HEAD")[:600]
 
-    if row["risk"] != "low":
+    approved = row["status"] == "approved"
+    if row["risk"] != "low" and not approved:
         return {"status": "done", "landed": "branch", "stat": stat,
-                "reason": f"위험도 {row['risk']} — 사람이 병합한다"}
+                "reason": f"위험도 {row['risk']} — 승인 대기"}
 
     gate_ok, gate_reason = _auto_gate(diff)
     if not gate_ok:
         return {"status": "demoted", "landed": "branch", "stat": stat,
                 "reason": f"자동반영 불가: {gate_reason}"}
 
-    verify_ok, verify_out = _run_verify(row["verify"])
-    if not verify_ok:
+    # 검증 명령은 low 자동반영에는 필수다 — 사람 검토가 없으니 그게 유일한
+    # 증거다. 사람이 이미 승인한 medium/high는 명령이 없어도(계획이 "검증할
+    # 방법이 마땅치 않다"고 적어 risk를 올렸을 수 있다) 막지 않는다 — 승인
+    # 자체가 그 자리를 대신한다.
+    if row["verify"]:
+        verify_ok, verify_out = _run_verify(row["verify"])
+        if not verify_ok:
+            return {"status": "demoted", "landed": "branch", "stat": stat,
+                    "reason": f"검증 실패: {verify_out[-300:]}"}
+    elif not approved:
         return {"status": "demoted", "landed": "branch", "stat": stat,
-                "reason": f"검증 실패: {verify_out[-300:]}"}
+                "reason": "검증 명령이 없다"}
+    else:
+        verify_out = "(사람 승인 — 자동 검증 명령 없음)"
 
-    # 세 관문을 다 지났다. main으로 보낸다 — 다음 사이클이 고쳐진 채 돈다.
+    # 관문을 지났다. main으로 보낸다 — 다음 사이클이 고쳐진 채 돈다.
     _git("switch", origin)
     _git("merge", "--ff-only", branch)
     sha = _git("rev-parse", "--short", "HEAD")
-    log.info("자동반영 — %s 를 %s 에 병합 (%s)", branch, origin, sha)
+    log.info("반영 — %s 를 %s 에 병합 (%s)", branch, origin, sha)
     return {"status": "done", "landed": "main", "stat": stat, "commit_sha": sha,
             "verify": verify_out[-300:]}
 
@@ -884,7 +909,9 @@ def _request_approval(conn: sqlite3.Connection, plan_id: int, parsed: dict[str, 
         f"고칠 파일: <code>{html.escape(', '.join(parsed['files'][:5]) or '미정')}</code>\n"
         f"검증: <code>{html.escape(parsed['verify'] or '없음')}</code>\n"
         f"위험도 <b>{parsed['risk']}</b> — {html.escape(parsed['risk_reason'][:200])}\n\n"
-        "<i>승인하면 전용 브랜치에서 작업합니다. main에는 안 닿습니다.</i>"
+        "<i>승인하면 전용 브랜치에서 작업한 뒤, 방어선 검사를 지나면 그 자리에서 "
+        "main에 바로 반영합니다. 방어선(제출·중복·한도)에 걸리면 브랜치로 내려 "
+        "다시 확인을 요청합니다.</i>"
     )
     buttons = [[
         {"text": "✅ 승인", "callback_data": f"fix:ok:{plan_id}"},
@@ -914,23 +941,28 @@ def _report_result(conn: sqlite3.Connection, row: sqlite3.Row, result: dict[str,
         return
 
     if status == "done" and result.get("landed") == "main":
+        why = ("검증 명령이 실제로 통과했습니다." if row["verify"]
+               else "승인하신 계획입니다(검증 명령은 없었습니다).")
         telegram.notify_with_buttons(
             conn,
-            f"🔧 <b>자동으로 고쳤습니다</b> — main에 반영됨\n\n"
+            f"🔧 <b>반영했습니다</b> — main에 병합됨\n\n"
             f"<pre>{html.escape(_commit_message(row)[:700])}</pre>\n"
             f"커밋 <code>{result.get('commit_sha')}</code>\n\n"
-            "<i>검증 명령이 실제로 통과했습니다. 다음 사이클부터 고쳐진 코드로 돕니다.</i>",
+            f"<i>{why} 다음 사이클부터 고쳐진 코드로 돕니다.</i>",
             [[{"text": "↩️ 되돌리기", "callback_data": f"revert:{result.get('commit_sha')}"}]],
         )
         return
 
     icon = {"done": "🌿", "demoted": "🟡", "skipped": "➖", "failed": "❌"}.get(status, "•")
-    head = {
-        "done": "브랜치에 두었습니다 — 사람이 병합하세요",
-        "demoted": "자동반영을 내렸습니다 — 확인이 필요합니다",
-        "skipped": "바뀐 것이 없습니다",
-        "failed": "수행 실패",
-    }.get(status, status)
+    if status == "demoted" and row["status"] == "approved":
+        head = "승인하셨지만 방어선에 걸려 반영을 내렸습니다 — 확인이 필요합니다"
+    else:
+        head = {
+            "done": "브랜치에 두었습니다 — 아직 승인되지 않았습니다",
+            "demoted": "자동반영을 내렸습니다 — 확인이 필요합니다",
+            "skipped": "바뀐 것이 없습니다",
+            "failed": "수행 실패",
+        }.get(status, status)
     telegram.notify(
         conn,
         f"{icon} <b>계획 #{row['id']}</b> — {head}\n"
