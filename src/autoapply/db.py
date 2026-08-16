@@ -181,6 +181,21 @@ CREATE TABLE IF NOT EXISTS companies (
 -- 애초에 낼 것이 있기는 한지 판단하려면 목록이 구조화돼 있어야 한다.
 --
 -- status가 '작성 중'인 이력서는 절대 제출하면 안 된다. 미완성 이력서가 나간다.
+-- 파이프라인이 플랫폼에 만든 이력서. 정리(cleanup)의 소유 근거다.
+--
+-- resume_builds로는 안 된다. 거기는 공고당 한 줄만 남아서(upsert), 같은 공고를
+-- 여러 번 만들면 예전 것이 기록에서 사라진다. 그러면 우리가 만든 이력서인데도
+-- '누구 것인지 모르는 것'이 되어 영영 안 지워진다.
+--
+-- 만들자마자 적는다. 채우다 실패한 이력서도 우리가 치울 물건이다.
+CREATE TABLE IF NOT EXISTS made_resumes (
+    title      TEXT PRIMARY KEY,
+    url        TEXT,
+    job_id     INTEGER,
+    template   TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS platform_resumes (
     platform     TEXT NOT NULL,
     resume_id    TEXT NOT NULL,             -- 플랫폼이 주는 불투명 id

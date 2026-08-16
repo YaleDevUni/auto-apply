@@ -1270,8 +1270,32 @@ def prepare_from_template(
     row.click()
     page.wait_for_timeout(4500)
 
+    _remember_made(title, page.url, template)
     return {"ok": True, "title": title, "url": page.url,
             "template": template, "renamed": renamed}
+
+
+def _remember_made(title: str, url: str, template: str) -> None:
+    """우리가 만든 이력서를 남긴다. 정리할 때 '우리 것'의 근거가 된다.
+
+    실패해도 흐름을 멈추지 않는다 — 기록이 없으면 그 이력서가 안 지워질 뿐이고,
+    안 지워지는 것은 잘못 지우는 것보다 훨씬 가볍다.
+    """
+    from ..db import connect, now
+
+    try:
+        conn = connect()
+        try:
+            with conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO made_resumes
+                       (title, url, job_id, template, created_at) VALUES (?,?,?,?,?)""",
+                    (title, url, None, template, now()),
+                )
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        log.info("이력서 생성 기록 실패(무시): %s", e)
 
 
 def _open_row_menu(page, title: str):
@@ -1459,13 +1483,45 @@ def delete_resume(page, title: str) -> bool:
     return gone
 
 
+def _our_titles() -> set[str]:
+    """파이프라인이 만든 이력서 제목. 이 밖의 것은 정리 대상이 아니다."""
+    from ..db import connect
+
+    conn = connect()
+    try:
+        titles = {r["title"] for r in conn.execute("SELECT title FROM made_resumes")}
+        # 이 표가 생기기 전에 만든 것도 우리 것이다. resume_builds에 남은
+        # 최신 기록을 같이 본다.
+        titles |= {
+            r["resume_title"]
+            for r in conn.execute(
+                "SELECT resume_title FROM resume_builds WHERE resume_title IS NOT NULL"
+            )
+            if r["resume_title"]
+        }
+        return {t for t in titles if t}
+    finally:
+        conn.close()
+
+
 def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
     """오래되거나 넘치는 이력서를 플랫폼에서 지운다.
 
     **웹에서만 지우고 로컬 사본은 남긴다.** `profile/generated/`의 JSON·MD가
     "무엇을 보냈는지"의 기록이므로, 플랫폼 목록은 작업 공간으로만 본다.
 
+    **우리가 만든 것만 지운다.** 이게 첫 번째 규칙이다.
+
+    처음엔 '오래되었거나 개수를 넘은 것'으로만 골랐는데, 그 기준은 *누가
+    만들었는지*를 묻지 않는다. 그래서 사람이 직접 만든 이력서를 지웠다
+    ([포지션 리뷰] 코르카 Software Engineer, 2026-08-16). 지원 기록에도 없고
+    로컬 사본도 없어서 되살릴 수 없었다.
+
+    나이와 개수는 **무엇을 지울지 정하는 기준이 아니라, 우리 것 중에서
+    무엇부터 지울지 정하는 기준**이다. 순서가 뒤바뀌면 남의 물건을 버린다.
+
     지우지 않는 것:
+      - `resume_builds`에 없는 것 — 우리가 만들지 않았다. 무엇인지 모른다
       - 기본 이력서 (삭제 버튼 자체가 없다)
       - config의 `resumes.protect`에 적힌 제목
       - 제출에 쓰였는데 **로컬 사본이 없는** 것 — 그건 유일한 기록이다
@@ -1484,6 +1540,7 @@ def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
     protect = set(cfg.get("protect") or [])
     submitted = submitted_titles()
     local = {p.stem.split("-", 1)[-1] for p in RESUME_OUT_DIR.glob("*.json")}
+    ours = _our_titles()
 
     with browser(headless=headless) as s:
         s.goto(_sel("url", CV_URL))
@@ -1492,9 +1549,16 @@ def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
         items = list_resumes_on(page)
 
         candidates = []
+        skipped_not_ours = []
         for i, it in enumerate(items):
             title = it["title"]
             if title in protect or it.get("is_default"):
+                continue
+            # 우리가 만든 기록이 없으면 손대지 않는다. 사람이 만든 것일 수도,
+            # 플랫폼이 만든 것일 수도 있고([포지션 리뷰] 같은), 어느 쪽이든
+            # 우리가 판단할 근거가 없다.
+            if title not in ours:
+                skipped_not_ours.append(title)
                 continue
             # 제출에 쓰인 것은 로컬 사본이 있을 때만 지운다
             if title in submitted and not local:
@@ -1509,11 +1573,13 @@ def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
                 })
 
         if dry_run:
-            return {"dry_run": True, "total": len(items), "would_delete": candidates}
+            return {"dry_run": True, "total": len(items),
+                    "would_delete": candidates, "우리 것 아님(건너뜀)": skipped_not_ours}
 
         deleted = [c["title"] for c in candidates if delete_resume(page, c["title"])]
         return {"dry_run": False, "total": len(items), "deleted": deleted,
-                "failed": [c["title"] for c in candidates if c["title"] not in deleted]}
+                "failed": [c["title"] for c in candidates if c["title"] not in deleted],
+                "우리 것 아님(건너뜀)": skipped_not_ours}
 
 
 def list_resumes_on(page) -> list[dict[str, str]]:
