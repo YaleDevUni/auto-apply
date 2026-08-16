@@ -269,8 +269,12 @@ def _trigger_plan(conn: sqlite3.Connection, command: str) -> str:
     if first in ("plan", "fix-run", "improve"):
         return "건너뜀(계획·수행 자신의 고장)"
 
+    # 'demoted'를 빠뜨리면 안 된다. 자동반영이 관문에 걸려 내려온 계획은 브랜치에
+    # 수정을 갖고 사람의 승인을 기다리는 상태인데, 같은 고장이 다시 나면 그걸
+    # 못 보고 새 계획을 또 띄운다 — 같은 곳을 고치는 브랜치가 계속 쌓인다.
     pending = conn.execute(
-        "SELECT COUNT(*) FROM fix_plans WHERE status IN ('pending','running','approved')"
+        "SELECT COUNT(*) FROM fix_plans "
+        "WHERE status IN ('pending','running','approved','demoted')"
     ).fetchone()[0]
     if pending:
         return f"건너뜀(처리 중인 계획 {pending}건)"
