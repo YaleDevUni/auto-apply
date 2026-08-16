@@ -1,3 +1,64 @@
+## 전 구간 무인 실주행 시도 — 한도에 막혔고, 막히는 방식이 고장이었다 (2026-08-17)
+
+"자동 계획→승인→fix-run을 사람 손 없이" 한 바퀴 돌리려고 **실제 고장 하나를
+재현해 큐에 넣었다.** 고른 고장은 대기 큐에 있던 '텔레그램 400'이다 —
+`telegram.notify()`에 4096자를 넘는 텍스트를 주면 400이 나고, `notify()`가
+예외를 삼켜서 **그 알림이 그 자리에서 사라진다**(`notify_with_buttons`는
+`text[:4096]`, `send_photo`는 `caption[:1024]`로 자르는데 `notify()`에만 그
+한도가 없다). 승인 요청이 이 경로로 나가면 사람은 아무것도 못 받는다.
+
+    재현: telegram.notify(conn, "가"*5000) → 400 Bad Request → False 반환
+    큐:   error_queue #4 (actionable), 지문 b609e1db49d4
+
+**이 고장은 일부러 안 고쳤다.** 자가복구가 스스로 고칠 첫 실물이다.
+
+기록할 때 알게 된 곁가지: httpx 예외 메시지에 **봇 토큰이 URL로 들어 있다.**
+그대로 기록하면 토큰이 error_queue와 계획 프롬프트에 남는다. 이번엔 손으로
+가려 넣었지만(`bot<TOKEN>`), `errors.record()`가 자동으로 가리게 하는 것은
+아직 안 했다.
+
+### 진짜 수확: 한도가 '가짜 계획'으로 둔갑했다
+
+`cli.py plan`이 자동으로 떴고 `claude`가 exit 1로 죽었다 — **월 지출 한도**다.
+그런데 파이프라인은 이렇게 반응했다:
+
+    claude exit 1, stdout "You've hit your monthly spend limit · raise it at ..."
+    → _agent()가 returncode를 안 봄 → 그 한 줄이 '에이전트의 답'
+    → _parse_plan 실패 → fix_plans #4 "계획을 읽지 못했습니다"(high, 승인대기)
+    → hold_for_fix 걸린 채 자동지원까지 정지
+
+한도 하나가 **가짜 계획 한 건 + 파이프라인 정지**가 됐다. 더 나쁜 건
+`_trigger_plan`의 빗장이 pending 계획을 세기 때문에, 이 상태에서는 새 고장이
+나도 계획이 안 세워진다는 것이다 — 사람이 폰에서 그 가짜 계획을 거절할 때까지.
+
+두 커밋으로 고쳤다:
+
+- **평문 한도를 못 알아봤다** (`llm.py`, 129e809) — f1a8a41이 고친 건 봉투로
+  오는 영어 한도(429·session limit)였다. 월 지출 한도는 JSON이 아니라 평문
+  한 줄로 와서 `_explain_failure`가 아무것도 못 꺼내고 마커에도 "spend limit"이
+  없었다. `raise_if_limited_failure(stdout, stderr)`로 실패 판정을 한곳에
+  모았다 — `llm.ask()`·`ask_session()`·`orchestrator._agent`가 같은 claude CLI를
+  부르며 판정을 셋으로 나눠 갖고 있어서, 한쪽만 고치면 나머지에서 또 샌다.
+- **`_agent`가 exit 코드를 안 봤다** (`orchestrator.py`, d62da9c) — 이제
+  exit≠0이면 한도/일반실패를 갈라 예외로 올린다. 그리고 **성공 출력에 대한
+  `_raise_if_limited(out)`를 지웠다** — 거기 오는 건 코딩 에이전트의 출력
+  전문이라 "rate limit"·"사용 한도"를 *논의하는* 계획문이 그대로 걸린다.
+  이 저장소의 계획문은 max_per_day·429를 늘 입에 올리므로 실제 위험이다.
+  한도는 exit≠0으로 온다는 게 실측이라 exit 분기가 전부 잡는다.
+
+검증: `_agent`에 가짜 subprocess를 물려 세 갈래(exit1+한도문 → UsageLimited,
+exit1+OAuth만료 → RuntimeError, exit0+'한도' 논하는 계획문 → 원문 통과)와,
+실제 `python cli.py plan`을 한도 걸린 상태로 돌려
+`{"planned":0,"reason":"사용 한도"}` + fix_plans 행 안 생김 + error_queue #4
+open 유지 + hold 해제를 DB로 확인했다.
+
+### 남은 것: 한도가 풀려야 전 구간이 돈다
+
+`claude -p`가 월 지출 한도라 **계획·수행 에이전트가 아예 안 뜬다**(대화형
+세션은 별개로 돈다). 한도를 올리거나 갱신되면 `python cli.py plan` 한 번으로
+error_queue #4에서 계획이 서고, 폰 승인 → `fix-run`까지 이어진다. 그때까지
+전 구간 무인 주행은 **미검증**이다.
+
 ## 승인 즉시 main 반영 + 자가복구 첫 실주행 (2026-08-17)
 
 `error_queue`가 actionable로 잡은 고장 하나(`claude 실행 실패`)와 사람이
@@ -413,9 +474,18 @@ stderr=STDOUT)`으로 `cli.py`를 fire-and-forget 실행하는데, 안에서 죽
 
 ## 대기
 
-- [ ] **텔레그램 400** — 링크를 넣은 캡션에서 400이 났다. HTML 앵커나 길이 문제로
-  보인다. 메시지가 안 가면 승인 흐름 전체가 멈춘다.
-  검증: 링크 포함 캡션이 정상 전송됨.
+- [ ] **텔레그램 400** — 원인 하나는 잡았다: `notify()`에만 길이 제한이 없어
+  4096자를 넘기면 400이고, 예외를 삼켜서 알림이 조용히 사라진다(재현 확인).
+  `_call()`이 400을 `httpx.HTTPError`로 보고 2번 더 재시도하는 것도 무의미하다
+  — 영구 실패다. **error_queue #4로 큐에 넣어 뒀고 손으로 안 고친다** —
+  자가복구가 스스로 고칠 첫 실물이다(위 2026-08-17 항목 참고).
+  링크 캡션에서 난 400은 별개일 수 있다(HTML 앵커 파싱). 그건 아직 미확인.
+  검증: 4096자 초과 알림이 잘려서라도 전송됨 + 링크 포함 캡션 정상 전송.
+
+- [ ] **고장 기록에 봇 토큰이 섞인다** — httpx 예외 메시지가 API URL을 통째로
+  담아서 `bot<토큰>/sendMessage`가 error_queue와 계획 프롬프트에 남는다.
+  `errors.record()`가 저장 전에 가려야 한다.
+  검증: 토큰이 든 예외를 기록했을 때 message·traceback에 토큰이 없음.
 
 - [ ] **사람인·자소설 편집기 레시피**
   이제 셀렉터가 `recipes/<platform>.json`의 `editor` 섹션에 있으므로, 다른
