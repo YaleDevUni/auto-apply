@@ -55,9 +55,34 @@ def _creds(conn: sqlite3.Connection) -> tuple[str, str]:
     return token, chat
 
 
-def _call(token: str, method: str, **payload: Any) -> dict[str, Any]:
-    r = httpx.post(API.format(token=token, method=method), json=payload, timeout=30)
-    r.raise_for_status()
+def _call(
+    token: str, method: str, *, retries: int = 2, retry_wait: float = 1.5, **payload: Any
+) -> dict[str, Any]:
+    """텔레그램 API를 부른다. 연결 오류는 짧게 재시도한다.
+
+    실측(2026-08-16): 사람이 보낸 명령에 답장하려던 sendMessage가
+    "Connection reset by peer"로 실패했다. `notify()`는 실패를 삼키고
+    포기하는 게 설계 의도지만(본 파이프라인을 막지 않으려고), 그 대가로
+    **그 답장이 그 자리에서 영영 사라졌다** — 헬스 알림처럼 "놓쳐도 다음에
+    또 온다"가 아니라 일회성 응답이라 재발송 기회가 없다. 몇 초 재시도로
+    넘어갈 수 있는 흔한 일시 오류이므로 여기서 먼저 흡수한다.
+
+    httpx.HTTPError만 재시도한다 — 연결 오류·타임아웃·5xx가 여기 걸린다.
+    `ok: false` 응답(잘못된 토큰 등 영구 실패)은 재시도해도 안 풀리므로 뺀다.
+    """
+    import time
+
+    r = None
+    for attempt in range(retries + 1):
+        try:
+            r = httpx.post(API.format(token=token, method=method), json=payload, timeout=30)
+            r.raise_for_status()
+            break
+        except httpx.HTTPError:
+            if attempt < retries:
+                time.sleep(retry_wait)
+                continue
+            raise
     data = r.json()
     if not data.get("ok"):
         raise RuntimeError(f"telegram {method} 실패: {data}")
