@@ -108,7 +108,12 @@ def build_command(
         "--setting-sources", "",
     ]
     if image_paths:
-        cmd += ["--allowed-tools", "Read", "--add-dir", str(ASSET_DIR)]
+        # 이미지가 있는 디렉터리를 모두 열어준다. ASSET_DIR만 열면 증적
+        # 스크린샷(EVIDENCE_DIR)을 못 읽어 "파일이 없다"로 조용히 끝난다.
+        dirs = {str(ASSET_DIR)} | {str(Path(x).parent) for x in image_paths}
+        cmd += ["--allowed-tools", "Read"]
+        for d in sorted(dirs):
+            cmd += ["--add-dir", d]
     else:
         cmd += ["--allowed-tools", ""]
     return cmd

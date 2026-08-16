@@ -510,10 +510,27 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
             page.wait_for_timeout(400)
         added.append(name)
 
-        add = page.locator('button:has-text("링크 추가")')
-        if add.count() and link is not links[:limit][-1]:
-            add.first.click(force=True)
-            page.wait_for_timeout(1200)
+        # 다음 링크를 넣으려면 빈 행을 먼저 만들어야 한다. '링크 추가' 버튼은
+        # 화면에 없고, 학력과 같은 방식(행 호버 → 행 안쪽 solid 아이콘)이다.
+        #
+        # 이게 없을 때 두 번째 링크가 첫 번째를 덮어썼다. `_fill_links`는 넣으려
+        # 시도한 이름을 그대로 돌려주므로 반환값만 보면 성공처럼 보였다 —
+        # 화면 점검(audit)이 없었으면 계속 몰랐을 결함이다.
+        if link is not links[:limit][-1]:
+            before = page.locator(LINK_NAME).count()
+            row = page.locator(LINK_ACTIVATOR).last
+            if row.count():
+                row.scroll_into_view_if_needed()
+                page.wait_for_timeout(400)
+                row.hover()
+                page.wait_for_timeout(1000)
+                btn = row.locator(ROW_ADD)
+                if btn.count():
+                    btn.first.click(force=True)
+                    page.wait_for_timeout(1500)
+            if page.locator(LINK_NAME).count() <= before:
+                log.info("링크 행을 더 만들지 못했다 — %d개까지만 넣는다", len(added))
+                break
     return added
 
 
@@ -562,6 +579,57 @@ FIELDS: dict[str, str] = {
 
 # 계정에서 자동으로 채워지는 값. 덮어쓰지 않는다 — 원티드가 갖고 있는 게 정본이다.
 PREFILLED = ("name", "mobile", "email")
+
+
+def audit(page, data: dict[str, Any]) -> dict[str, Any]:
+    """조립한 값이 **화면에 실제로 보이는지** 확인한다.
+
+    필드 값 대조(`input_value()`)와 다른 층위다. 그쪽은 "내가 넣은 칸"만 보므로,
+    안 건드린 섹션이 비었거나 저장이 반쯤 된 상태를 못 잡는다. 여기서는 렌더된
+    본문 텍스트에서 핵심 값을 찾는다 — 사람이 화면을 훑는 것과 같은 층위다.
+
+    완성도 %를 쓰지 않는 이유: '작성 완료'를 누르면 그 패널이 사라진다.
+    초안에서만 보이는 신호라 최종 점검에는 못 쓴다.
+
+    스크린샷을 비전 모델로 읽는 방법도 있지만, 이 화면은 텍스트가 그대로
+    나오므로 그쪽이 더 싸고 정확하다. 스크린샷은 사람의 최종 판단용이다.
+    """
+    # innerText에는 input·textarea의 **값이 들어가지 않는다.** 본문만 읽으면
+    # 셀렉트가 렌더한 라벨(언어 등)만 잡히고 나머지는 전부 실패로 나온다.
+    # 실제 화면에 담긴 것 = 본문 텍스트 + 모든 입력칸의 현재 값.
+    haystack = page.inner_text("body") + "\n" + "\n".join(
+        page.evaluate(
+            """() => [...document.querySelectorAll('input,textarea')]
+                 .filter(e => { const r = e.getBoundingClientRect();
+                                return r.width > 0 && r.height > 0; })
+                 .map(e => e.value || '')"""
+        )
+    )
+    body = haystack
+    checks: dict[str, bool] = {}
+
+    def has(label: str, value: str | None, n: int = 12) -> None:
+        if value:
+            checks[label] = value.strip()[:n] in body
+
+    exps = data.get("experiences") or []
+    edus = data.get("educations") or []
+    if exps:
+        has("회사", exps[0].get("company"))
+        ach = (exps[0].get("achievements") or [{}])[0]
+        has("주요성과", ach.get("title"))
+    for i, ed in enumerate(edus[:2]):
+        has(f"학교{i}", ed.get("school"))
+    has("간단소개", (data.get("summary") or "").splitlines()[0] if data.get("summary") else None)
+    if data.get("skills"):
+        checks["스킬"] = any(sk[:10] in body for sk in data["skills"][:5])
+    if data.get("links"):
+        has("링크", (data["links"][0] or {}).get("name"))
+    if data.get("languages"):
+        has("언어", (data["languages"][0] or {}).get("level"))
+
+    missing = [k for k, ok in checks.items() if not ok]
+    return {"checks": checks, "missing": missing, "ok": not missing}
 
 
 def finalize(page) -> bool:
@@ -760,6 +828,11 @@ def fill(
         }
         lost = [k for k, ok in persisted.items() if not ok]
 
+        # 화면 수준 점검. 값 대조가 통과해도 섹션이 미완성일 수 있다.
+        page_audit = audit(p, data)
+        if not page_audit["ok"]:
+            log.warning("화면에서 확인되지 않는 항목: %s", page_audit["missing"])
+
         # 검증 뒤에 '작성 완료'를 누른다. 누르면 편집 화면을 벗어나 입력칸이
         # 사라지므로, 먼저 누르면 위의 대조를 할 수 없다.
         finalized = finalize(p)
@@ -768,7 +841,8 @@ def fill(
             "url": url, "title": title, "dry_run": False,
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
-            "dates": dates, "selects": selects, "finalized": finalized, "skills": skills, "skills_skipped": skills_skipped,
+            "dates": dates, "selects": selects, "finalized": finalized,
+            "audit": page_audit, "skills": skills, "skills_skipped": skills_skipped,
             "links": links, "languages": langs,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),

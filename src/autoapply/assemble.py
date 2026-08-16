@@ -564,3 +564,77 @@ def _load_cached(
     finally:
         if own:
             conn.close()
+
+
+# ─────────────────── 스크린샷 비전 점검 ───────────────────
+#
+# DOM 대조는 플랫폼마다 셀렉터를 알아야 한다. 스크린샷 판독은 그게 필요 없어
+# 사람인·자소설에도 그대로 쓸 수 있다. 이력서는 자주 만들지 않으므로 건당
+# 비용(수 초·수십 원)을 감당할 만하다.
+#
+# DOM 점검을 대체하는 게 아니라 층을 하나 더 얹는 것이다. DOM은 "값이 칸에
+# 들어갔나"를, 비전은 "사람이 봤을 때 이상한 데가 없나"를 본다.
+
+VISION_PROMPT = """먼저 Read 도구로 아래 파일을 읽어라. 읽지 않으면 판단할 수 없다.
+
+    {shot}
+
+이 이미지는 채용 플랫폼의 이력서 편집 화면이다.
+아래 [의도한 내용]이 화면에 제대로 반영됐는지 확인하라.
+
+지적할 것 — 이것만:
+1. 의도한 항목이 화면에서 안 보임 (누락)
+2. 값이 엉뚱한 칸에 들어감 (예: 회사명 칸에 직무)
+3. 문장이 중간에 잘림
+4. 빈 필수 칸(빨간 * 표시)이 남아 있음
+5. 오류 메시지·경고 배너
+
+지적하지 말 것: 줄바꿈·여백·글꼴 등 미관, 내용의 좋고 나쁨.
+
+출력 — 다른 말은 하지 마라:
+- 문제가 없으면 정확히 `OK` 한 줄.
+- 있으면 문제당 한 줄씩 `- `로 시작하는 목록.
+
+[의도한 내용]
+{intent}
+"""
+
+
+def verify_screenshot(shot: str, data: dict[str, Any]) -> dict[str, Any]:
+    """스크린샷을 읽어 이상한 곳을 찾는다. 실패해도 본 작업을 막지 않는다."""
+    path = Path(shot)
+    if not path.exists():
+        return {"ok": None, "reason": "스크린샷 없음"}
+
+    exps = data.get("experiences") or []
+    intent = "\n".join(
+        filter(None, [
+            f"이름: 박예일",
+            f"간단 소개 첫 줄: {(data.get('summary') or '').splitlines()[0][:60]}",
+            f"회사: {exps[0].get('company')}" if exps else "",
+            f"주요 성과: {(exps[0].get('achievements') or [{}])[0].get('title')}" if exps else "",
+            "학력: " + ", ".join(e.get("school", "") for e in (data.get("educations") or [])),
+            f"AI 활용: {data.get('ai_usage', '')[:50]}",
+            "스킬: " + ", ".join((data.get("skills") or [])[:8]),
+            "링크: " + ", ".join((l or {}).get("name", "") for l in (data.get("links") or [])),
+            "언어: " + ", ".join(
+                f"{(l or {}).get('name')} {(l or {}).get('level')}"
+                for l in (data.get("languages") or [])
+            ),
+        ])
+    )
+
+    try:
+        cfg = effective_config().get("llm", {})
+        out = llm.ask(
+            VISION_PROMPT.format(intent=intent, shot=path),
+            image_paths=[path],
+            model=cfg.get("vision_model", cfg.get("model", "claude-sonnet-5")),
+        ).strip()
+    except Exception as e:  # noqa: BLE001
+        log.warning("비전 점검 실패(무시): %s", e)
+        return {"ok": None, "reason": str(e)[:120]}
+
+    ok = out.upper().startswith("OK")
+    issues = [] if ok else [ln.strip() for ln in out.splitlines() if ln.strip().startswith("-")]
+    return {"ok": ok, "issues": issues}
