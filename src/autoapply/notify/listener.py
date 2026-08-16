@@ -60,7 +60,7 @@ HELP = (
     "/revlog edit N 내용  N번을 고친다\n"
     "/revlog delete N     N번을 지운다\n\n"
     "<b>수동 실행 (언제든, 스케줄 무관)</b>\n"
-    "/지원시작 [건수]     수집→지원준비를 지금 바로. 기본 1건\n"
+    "/apply [건수]        수집→지원준비를 지금 바로. 기본 1건\n"
     "/improve             개발 지시 큐 + 자체진단을 지금 처리\n\n"
     "<b>개발 지시</b>\n"
     "그 외 아무 말이나 보내면 개발 큐에 쌓입니다. 자동으로는 안 돌고, "
@@ -277,7 +277,7 @@ def _cmd_apply_start(conn: sqlite3.Connection, rest: str) -> str:
     n = rest.strip()
     target = int(n) if n.isdigit() else 1
     if n and not n.isdigit():
-        return "사용법: <code>/지원시작 [건수]</code>  (숫자만, 생략하면 1건)"
+        return "사용법: <code>/apply [건수]</code>  (숫자만, 생략하면 1건)"
 
     import subprocess
 
@@ -335,10 +335,15 @@ def _handle(conn: sqlite3.Connection, text: str) -> str:
         return _cmd_guide(conn, stripped[len(cmd):].strip())
     if cmd == "/revlog":
         return _cmd_revlog(conn, stripped[len(cmd):].strip())
-    if cmd in ("/지원시작", "/apply_start"):
+    if cmd == "/apply":
         return _cmd_apply_start(conn, stripped[len(cmd):].strip())
     if cmd == "/improve":
         return _cmd_improve(conn, stripped[len(cmd):].strip())
+
+    # 명령어를 몰라서 그냥 "/"만 보내는 경우 — "모르는 명령입니다"를 앞세우지
+    # 않고 바로 도움말을 보여준다. /help와 동작이 같다.
+    if cmd == "/":
+        return HELP
 
     if cmd in COMMANDS:
         try:
