@@ -373,6 +373,76 @@ def _fill_languages(page, languages: list[dict], limit: int = 3) -> list[str]:
     return done
 
 
+def _chip_labels(page) -> list[str]:
+    """스킬 영역에 떠 있는 칩 이름들.
+
+    **삭제 아이콘(svg)을 조건으로 걸면 안 된다.** 그 아이콘은 입력칸이 열려야
+    생긴다 — 닫힌 상태에서 읽으면 칩이 하나도 안 잡히고, 그래서 입력칸을 여는
+    폴백(기존 칩 클릭)이 통째로 실패했다.
+
+    범위는 스킬 입력칸이 속한 ActiveBox, 없으면 '스킬' 제목 다음의 ActiveBox다.
+    페이지 전체로 넓히면 사이드바 버튼('이력서 리뷰')까지 칩으로 잡혀, 지우려고
+    20번 헛클릭하고 성공으로 보고했다.
+    """
+    raw = page.evaluate(
+        """(inputSel) => {
+            // 범위는 **항상 '스킬' 제목 기준**이다. 입력칸 기준으로 잡으면
+            // 입력칸이 열린 뒤 다른 ActiveBox(날짜 칸 등)를 가리켜, 칩 대신
+            // 'YYYY.MM'이 잡힌다.
+            const head = [...document.querySelectorAll('*')].find(
+                e => e.children.length === 0 && (e.innerText || '').trim() === '스킬');
+            if (!head) return [];
+            const y = head.getBoundingClientRect().top + window.scrollY;
+            const scope = [...document.querySelectorAll('div[class*=ActiveBox]')]
+                .find(b => b.getBoundingClientRect().top + window.scrollY >= y - 10);
+            if (!scope) return [];
+            return [...scope.querySelectorAll('button')]
+                .filter(b => b.querySelector('span span'))
+                .map(b => (b.querySelector('span span').innerText || '').trim());
+        }""",
+        _sel("skill.input", SKILL_INPUT),
+    )
+    return [x for x in raw if x and "\n" not in x and len(x) <= 40]
+
+
+def _prune_skills(page, wanted: list[str], present: list[str] | None = None) -> list[str]:
+    """이번 공고에 없는 스킬 칩을 걷어낸다.
+
+    미리보기 이력서를 재사용하므로 추가만 하면 **이전 공고의 스킬이 그대로 남아
+    섞인다.** 공고별 맞춤 이력서인데 그러면 맞춤의 의미가 없다 — 비전 점검이
+    "JSON에 없는 Python, NestJS가 화면에 있다"로 잡아낸 문제다.
+
+    칩은 버튼이고 그 안의 svg가 삭제 아이콘이다. 입력칸이 열려 있어야 보인다.
+    변형 표기(AWS(EC2, S3) → AWS)로 등록됐을 수 있으므로 원본과 변형을 모두
+    보존 대상으로 본다.
+    """
+    keep = {v for sk in wanted for v in _skill_variants(sk)}
+
+    # 지울 목록은 **입력칸을 열기 전에 읽어둔 것**을 쓴다. 입력칸이 열리면
+    # 레이아웃이 바뀌어 같은 범위 계산이 날짜 칸('YYYY.MM')을 가리킨다.
+    chips = present if present is not None else _chip_labels(page)
+    todo = [x for x in chips if x not in keep]
+    removed: list[str] = []
+
+    for label in todo:
+        target = page.locator(f'button:has(span:text-is("{label}"))').first
+        if not target.count():
+            continue
+        try:
+            target.locator("svg").first.click(force=True)
+            page.wait_for_timeout(700)
+        except Exception as e:  # noqa: BLE001
+            log.info("칩 삭제 실패 — 건너뜀: %s (%s)", label, type(e).__name__)
+            continue
+
+        # 눌렀다고 지워진 게 아니다. 실제로 사라졌는지 본다.
+        if page.locator(f'button:has(span:text-is("{label}"))').count():
+            log.info("칩이 그대로 남았다: %s", label)
+            continue
+        removed.append(label)
+    return removed
+
+
 def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], list[str]]:
     """스킬 칸을 채운다. 원티드 스킬 DB에 있는 것만 등록된다.
 
@@ -385,6 +455,8 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], l
     added: list[str] = []
     skipped: list[str] = []
     skill_input = _sel("skill.input", SKILL_INPUT)
+    # 입력칸을 열기 전에 읽어야 한다 — 열면 레이아웃이 바뀌어 범위 계산이 어긋난다.
+    existing = _chip_labels(page)
 
     # 스킬 입력칸은 상태에 따라 세 모습이다:
     #   비어 있음      → "내가 가진 직무 스킬..." 안내 문구를 눌러 연다
@@ -412,6 +484,17 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], l
         log.warning("스킬 입력칸을 열지 못했다")
         return added, skipped
     box.scroll_into_view_if_needed()
+
+    # **기본값 꺼짐.** 삭제는 확실히 되는데 그 뒤 추가가 저장되지 않아, 켜면
+    # 스킬이 통째로 비는 상태가 됐다(실측: 11개 → 1개). 누적보다 손실이 나쁘다.
+    #
+    # 원인 미확인. 삭제 후 추가 경로에서 저장 요청이 안 나가는 것으로 보이며,
+    # 날짜 칸에서 겪은 것과 같은 부류일 가능성이 있다 — 같은 섹션의 다른 칸을
+    # 건드려야 PATCH가 나가는 구조. 확인 전까지는 켜지 않는다.
+    if _sel("skill.prune", "") == "on":
+        removed = _prune_skills(page, skills[:limit], present=existing)
+        if removed:
+            log.info("이전 공고 스킬 %d개 제거: %s", len(removed), ", ".join(removed[:6]))
 
     for skill in skills[:limit]:
         chosen = None
