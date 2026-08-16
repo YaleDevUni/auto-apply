@@ -298,6 +298,78 @@ ACH_DETAIL = 'textarea[placeholder^="업무 경험을 성과"]'
 ACH_TITLE = 'input[name="title"]'
 
 
+# 행에 호버하면 오른쪽에 나타나는 휴지통. 클래스가 해시가 아니라 의미 있는
+# 접두사라 잡을 수 있다(ResumeItem_ResumeItem__와 같은 방식).
+ROW_DELETE = 'button[class*="BtnDelete_BtnDelete__"]'
+
+
+def _delete_row(page, anchor_sel: str, nth: int) -> bool:
+    """anchor_sel의 nth번째 행을 지운다. 되돌릴 수 없다.
+
+    행 자체를 가리키는 셀렉터가 없다. 그 행의 입력칸에 호버하면 오른쪽에
+    휴지통이 뜨고, 그것을 **같은 높이에 있는 것**으로 골라야 한다 — 페이지
+    전체에서 고르면 다른 섹션의 휴지통을 누른다.
+    """
+    anchors = page.locator(anchor_sel)
+    if nth >= anchors.count():
+        return False
+
+    target = anchors.nth(nth)
+    target.scroll_into_view_if_needed()
+    page.wait_for_timeout(400)
+    target.hover()
+    page.wait_for_timeout(900)
+
+    box = target.bounding_box()
+    if not box:
+        return False
+
+    btns = page.locator(ROW_DELETE)
+    for k in range(btns.count()):
+        b = btns.nth(k)
+        try:
+            if not b.is_visible():
+                continue
+            bb = b.bounding_box()
+            if not bb or abs(bb["y"] - box["y"]) > 120:
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        b.click(force=True)
+        page.wait_for_timeout(1200)
+        # 확인 모달이 뜨면 승인한다. 부른 시점에 이미 결정된 일이다.
+        for label in ("삭제", "확인"):
+            ok = page.locator(f'[role=dialog] button:has-text("{label}")')
+            if ok.count():
+                ok.first.click(force=True)
+                page.wait_for_timeout(1200)
+                break
+        return True
+
+    log.info("삭제 버튼을 못 찾았다: %s nth=%d", anchor_sel, nth)
+    return False
+
+
+def _prune_rows(page, anchor_sel: str, keep: int, *, label: str = "행") -> int:
+    """keep개만 남기고 뒤에서부터 지운다. 반환은 지운 개수.
+
+    뒤에서부터 지우는 이유: 앞에서 지우면 남은 행의 인덱스가 밀려서, 다음 차례에
+    엉뚱한 행을 지운다.
+
+    사본에서 시작하면 템플릿이 들고 온 성과가 공고와 안 맞을 수 있다. 덮어쓰지
+    않고 남겨두면 지원하는 자리와 무관한 경력이 이력서에 그대로 실린다 —
+    맞지 않는 내용을 붙여 내느니 지우는 편이 낫다.
+    """
+    removed = 0
+    for i in range(page.locator(anchor_sel).count() - 1, keep - 1, -1):
+        if _delete_row(page, anchor_sel, i):
+            removed += 1
+            log.info("%s %d번째 삭제", label, i)
+        else:
+            break
+    return removed
+
+
 def _fill_achievements(page, achievements: list[dict], limit: int = 4) -> int:
     """주요 성과를 여러 건 채운다. 반환은 실제로 채운 건수.
 
@@ -320,6 +392,12 @@ def _fill_achievements(page, achievements: list[dict], limit: int = 4) -> int:
         _dismiss(page)
         add.first.click(force=True)
         page.wait_for_timeout(1400)
+
+    # 칸이 내용보다 많으면 남는 칸을 지운다. 사본이 들고 온 성과는 이 공고를
+    # 보고 고른 게 아니라, 그대로 두면 안 맞는 경력이 실려 나간다.
+    surplus = page.locator(ACH_DETAIL).count() - len(items)
+    if surplus > 0:
+        _prune_rows(page, ACH_DETAIL, len(items), label="주요 성과")
 
     slots = page.locator(ACH_DETAIL).count()
     filled = 0
