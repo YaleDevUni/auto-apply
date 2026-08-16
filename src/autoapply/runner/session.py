@@ -66,6 +66,92 @@ class Session(Protocol):
 CDP_PORT = 9222
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 
+# 상주 브라우저를 오래 붙잡고 쓰면(실측 2026-08-16: 5시간 이상, 여러 날에
+# 걸친 프로필 재사용 누적) 렌더러가 조용히 맛이 간다 — 이동·클릭은 멀쩡한데
+# screenshot()만 타임아웃까지 정확히 그 시간을 다 쓰고 실패한다("느려서"가
+# 아니라 새 프레임을 아예 못 만드는 상태다: 15초든 60초든 그 값 그대로,
+# about:blank 같은 빈 페이지도 동일 증상, 누적된 서비스워커 72개를 정리해도
+# 무관했다). 껐다 켜면 즉시 회복된다(재현 3/3, 2~4초로 정상화). 로그인
+# 세션은 디스크 프로필에 남으므로 재시작해도 유지된다.
+#
+# 그 자리에서 바로 죽이지 않는 이유: screenshot() 실패 시점엔 같은 브라우저를
+# 다른 스텝이 아직 쓰고 있을 수 있다(호출부의 뒷정리 등). 대신 여기 표시만
+# 남기고, **다음 세션을 새로 시작할 때**(PlaywrightSession.start() 맨 앞 —
+# 아직 아무 작업도 안 걸려 있는 안전한 경계) 소비해서 그때 재시작한다.
+_RESTART_FLAG = BROWSER_DIR.parent / ".needs_browser_restart"
+
+
+def flag_needs_restart(reason: str = "") -> None:
+    """다음 세션 시작 전에 상주 브라우저를 재시작하라는 표시를 남긴다."""
+    _RESTART_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    _RESTART_FLAG.write_text(reason or "unknown", encoding="utf-8")
+
+
+def _consume_restart_flag() -> str | None:
+    if not _RESTART_FLAG.exists():
+        return None
+    reason = _RESTART_FLAG.read_text(encoding="utf-8")
+    _RESTART_FLAG.unlink(missing_ok=True)
+    return reason
+
+
+def _kill_resident() -> None:
+    """CDP_PORT에 붙은 상주 브라우저 프로세스를 찾아 종료한다."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["lsof", "-t", "-P", "-n", f"-itcp:{CDP_PORT}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return
+    for pid in out.split():
+        try:
+            subprocess.run(["kill", pid.strip()], timeout=5, check=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _spawn_resident(*, wait_sec: int = 20) -> bool:
+    """상주 브라우저를 자식 프로세스로 띄우고, CDP가 응답할 때까지 기다린다.
+
+    브라우저 프로세스는 이 함수를 부른 프로세스가 끝나도 살아남는다 —
+    `while True: sleep`로 자기 자신을 붙잡아두는 자식 파이썬 프로세스가 곧
+    브라우저 수명이다(`cli.py _browser_open`과 같은 패턴).
+    """
+    import subprocess
+    import time as _t
+
+    import httpx
+
+    from ..paths import CODE_ROOT
+
+    subprocess.Popen(
+        [str(CODE_ROOT / ".venv/bin/python"), "-c",
+         "import sys; sys.path.insert(0,'.');"
+         "from src.autoapply.runner.session import PlaywrightSession;"
+         "s=PlaywrightSession(hidden=False); s.start();"
+         "s.goto('https://www.wanted.co.kr/cv');"
+         "import time;\n"
+         "while True: time.sleep(3600)"],
+        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+    )
+    for _ in range(wait_sec):
+        _t.sleep(1)
+        try:
+            httpx.get(f"{CDP_URL}/json/version", timeout=2)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def restart_resident() -> bool:
+    """상주 브라우저를 껐다 켠다. 실측으로 확인한 렌더러 정지의 유일한 회복법."""
+    _kill_resident()
+    return _spawn_resident()
+
 
 def _hidden_default() -> bool:
     """설정에서 읽는다. 기본은 숨김 — 사람 화면을 뺏지 않는 쪽이 기본이어야 한다."""
@@ -109,6 +195,12 @@ class PlaywrightSession:
 
     def start(self) -> None:
         from playwright.sync_api import sync_playwright
+
+        reason = _consume_restart_flag()
+        if reason is not None:
+            log.warning("상주 브라우저 재시작 신호 발견(%s) — 재시작 후 이어감", reason[:100])
+            if not restart_resident():
+                log.warning("상주 브라우저 재시작 실패 — 기존 흐름대로 계속 시도")
 
         self._dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
@@ -252,7 +344,15 @@ class PlaywrightSession:
 
     def screenshot(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._page.screenshot(path=str(path), full_page=True)
+        try:
+            self._page.screenshot(path=str(path), full_page=True)
+        except Exception:
+            # 렌더러가 멎은 상태일 수 있다(모듈 docstring의 _RESTART_FLAG 참고).
+            # 이 호출 자체는 못 살리지만, 다음 세션 시작 때 자동으로 회복되게
+            # 표시만 남긴다 — 지금 당장 죽이면 다른 스텝이 같은 브라우저를
+            # 쓰고 있을 수 있다.
+            flag_needs_restart("screenshot timeout")
+            raise
 
     # ── 러너가 쓰는 부가 기능 ──────────────────────────────────
 
