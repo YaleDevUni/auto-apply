@@ -74,8 +74,17 @@ def _fetch(conn: sqlite3.Connection, wait: int = 0) -> list[dict[str, Any]]:
     }
     if offset:
         params["offset"] = int(offset) + 1
+    # 타임아웃을 단계별로 나눈다. 통짜 timeout=wait+20은 연결이 멎었을 때
+    # 45초를 통째로 날리고, 그동안 버튼 누름을 못 받는다. 실측: 두 번 연속
+    # 멎어 90초가 비었고, 그 사이 눌린 버튼의 callback_query가 만료돼
+    # answerCallbackQuery가 400을 냈다 — 사람 눈에는 "눌러도 반응이 없다"다.
+    #
+    # read는 서버가 붙잡고 있는 시간(wait)에 여유만 더한다. connect가 짧은
+    # 이유는 붙는 데 오래 걸리는 건 이미 문제라서다 — 기다릴 게 아니라 다시 건다.
     r = httpx.get(
-        API.format(token=token, method="getUpdates"), params=params, timeout=wait + 20
+        API.format(token=token, method="getUpdates"),
+        params=params,
+        timeout=httpx.Timeout(connect=8, read=wait + 8, write=8, pool=8),
     )
     r.raise_for_status()
     return r.json().get("result", [])
@@ -215,7 +224,9 @@ def drain(conn: sqlite3.Connection, *, reply: bool = True, wait: int = 0) -> dic
     try:
         updates = _fetch(conn, wait)
     except Exception as e:  # noqa: BLE001
-        log.info("텔레그램 수신 건너뜀: %s", e)
+        # WARNING인 이유: 수신이 멎은 동안 누른 버튼은 만료돼 사라진다.
+        # INFO로 묻어두면 "왜 반응이 없지"를 로그에서 못 찾는다.
+        log.warning("텔레그램 수신 실패 — 즉시 재시도: %s", e)
         return {"received": 0, "reason": str(e)[:120]}
 
     my_chat = get_setting(conn, S_CHAT, "")
