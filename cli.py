@@ -1003,4 +1003,22 @@ def _delete_submitted_resume(job_id: int, title: str) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # 텔레그램이 이 CLI를 subprocess.Popen(stdout=DEVNULL, stderr=STDOUT)로
+    # 띄운다 — 수신 루프를 막지 않으려고 fire-and-forget으로 돌리는데, 그 말은
+    # 죽어도 어디에도 안 남는다는 뜻이다. 실제로 그렇게 사라진 실패가 있었다
+    # (/guide 요청이 확인 메시지만 가고 결과가 안 옴 — 원인을 로그에서 못 찾음).
+    # 여기서 잡아 최소한 "뭔가 죽었다"는 사실만이라도 폰으로 남긴다.
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except BaseException as e:  # noqa: BLE001
+        cmd = " ".join(sys.argv[1:])[:150]
+        try:
+            _tell(
+                f"❌ <b>cli.py 처리 안 된 오류</b>\n<code>{html.escape(cmd)}</code>\n"
+                f"<i>{type(e).__name__}: {str(e)[:300]}</i>"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        raise
