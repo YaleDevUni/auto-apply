@@ -439,6 +439,14 @@ def _cmd_apply_start(conn: sqlite3.Connection, rest: str) -> str:
     if n and not n.isdigit():
         return "사용법: <code>/apply [건수]</code>  (숫자만, 생략하면 1건)"
 
+    # **정지 상태를 여기서 먼저 본다.** 예전에는 안 보고 "🚀 시작합니다"라고
+    # 답한 뒤 띄웠고, night-cycle은 안에서 is_paused에 걸려 0초 만에 죽었다.
+    # 그 출력은 /dev/null이었으므로 사람에게는 "시작한다더니 영영 아무 일도
+    # 안 일어난다"로 보인다 — running_tasks #15·#19·#21이 시작·종료 시각이
+    # 같은 0초짜리로 남아 있다. 시작했다고 답하고 안 하는 것이 제일 나쁘다.
+    if is_paused(conn):
+        return _offer_resume_and_start(conn, target)
+
     from ..paths import CODE_ROOT
 
     tasks.spawn(
@@ -450,6 +458,33 @@ def _cmd_apply_start(conn: sqlite3.Connection, rest: str) -> str:
         "<i>판정 → 조립까지, 건당 수 분씩 걸립니다. 준비되는 대로 "
         "바로바로 사진을 보내드립니다.</i>"
     )
+
+
+def _offer_resume_and_start(conn: sqlite3.Connection, target: int) -> str:
+    """정지 중이라고 알리고, 한 번에 풀고 시작할 버튼을 준다.
+
+    자동으로 풀지 않는 이유: 정지를 건 주체가 둘이고 무게가 다르다. 사람이 건
+    `/pause`는 "지금 나가면 안 된다"는 판단이고, 자가복구 보류는 "고장 난 채로
+    내보내지 마라"다. `/apply`가 알아서 풀면 **되돌릴 수 없는 지원이 사람도
+    시스템도 원하지 않은 상태에서 나간다.**
+
+    그렇다고 거절만 하면 예전 증상이 반쯤 남는다 — 왜 안 되는지 알아도
+    `/resume`을 따로 치고 `/apply`를 다시 쳐야 한다. 버튼 하나로 합친다.
+    """
+    held = fix_hold(conn)
+    why = pause_reason(conn)
+    warn = (
+        "\n\n<i>⚠️ 자가복구가 진행 중입니다 — 고장이 안 고쳐진 상태로 "
+        "지원이 나갈 수 있습니다.</i>" if held else ""
+    )
+    telegram.notify_with_buttons(
+        conn,
+        f"⏸ <b>자동지원이 정지 상태입니다</b> — 지금 누르면 아무 일도 안 일어납니다.\n"
+        f"<i>{html.escape(why)}</i>{warn}\n\n"
+        f"풀고 목표 {target}건을 시작하려면 아래를 누르세요.",
+        [[{"text": f"▶️ 재개하고 {target}건 시작", "callback_data": f"resumerun:{target}"}]],
+    )
+    return ""  # 위에서 직접 보냈다. drain이 빈 답장은 안 보낸다.
 
 
 def _cmd_errors(conn: sqlite3.Connection, rest: str) -> str:
@@ -755,7 +790,10 @@ def drain(conn: sqlite3.Connection, *, reply: bool = True, wait: int = 0) -> dic
 
         answer = _handle(conn, text)
         handled += 1
-        if reply:
+        # 빈 답장은 안 보낸다. 명령이 스스로 버튼 달린 메시지를 보냈다는 뜻이다
+        # (`/apply`가 정지 상태에서 그렇게 한다). 빈 문자열로 sendMessage를
+        # 부르면 텔레그램이 400을 낸다.
+        if reply and answer:
             notify(conn, answer)
 
     return {"received": len(updates), "handled": handled, "ignored": ignored}
@@ -846,6 +884,16 @@ def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
     """
     data = cb.get("data") or ""
     cb_id = cb.get("id", "")
+
+    # 정지를 풀고 그 자리에서 지원준비를 시작한다. `/apply`가 정지 상태에서
+    # 내놓는 버튼이다 — 사람이 정지를 풀겠다고 명시적으로 누른 지점이라
+    # 자동으로 푸는 것과 다르다.
+    if data.startswith("resumerun:"):
+        target = data.split(":", 1)[1]
+        telegram.answer_callback(conn, cb_id, "재개하고 시작합니다")
+        notify(conn, _cmd_resume(conn))
+        notify(conn, _cmd_apply_start(conn, target))
+        return
 
     if data.startswith("skip:"):
         telegram.answer_callback(conn, cb_id, "넘어갑니다")
