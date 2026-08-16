@@ -2,7 +2,11 @@
 # launchd 진입점. 모드 인자로 무엇을 할지 정한다 — "지금 몇 시지?"를
 # 스크립트가 다시 추측하지 않는다.
 #
-#   night  02:00  수집 → 지원준비를 목표건수/대기열 소진까지 반복.
+#   scrape 12:00  수집 + 두 축 판정. 하루 한 번이면 충분하다 — 지원준비와
+#                 시각을 분리해서, /apply로 급히 지원준비만 부를 때 매번
+#                 수 분짜리 전체 수집이 같이 안 돌게 했다(2026-08-16).
+#   night  02:00  지원준비를 목표건수/대기열 소진까지 반복(수집은 안 함,
+#                 정오에 이미 모아둔 대기열에서 고른다).
 #                 알림은 안 보낸다(쌓아만 둠). 이력서 정리도 여기서 하루 한 번.
 #   flush  09:00  밤사이 쌓인 알림을 한 번에 보낸다.
 #
@@ -35,8 +39,12 @@ echo "=== $(date '+%F %T') [$MODE] 시작 ==="
 "$PY" cli.py listen || echo "listen 실패 (건너뜀)"
 
 case "$MODE" in
+  scrape)
+    echo "--- 수집 + 판정 ---"
+    "$PY" cli.py scrape --check-session || echo "scrape 실패 (내일 재시도)"
+    ;;
   night)
-    echo "--- 수집 → 지원준비 (목표 30건 또는 대기열 소진까지, 알림은 9시에) ---"
+    echo "--- 지원준비 (목표 30건 또는 대기열 소진까지, 알림은 9시에) ---"
     "$PY" cli.py night-cycle --target 30 --defer || echo "night-cycle 실패 (다음날 이어받는다)"
 
     echo "--- 이력서 정리 ---"
@@ -47,7 +55,7 @@ case "$MODE" in
     "$PY" cli.py flush-notify || echo "flush-notify 실패"
     ;;
   *)
-    echo "모르는 모드: $MODE (night 또는 flush)" >&2
+    echo "모르는 모드: $MODE (scrape, night, flush 중 하나)" >&2
     exit 1
     ;;
 esac

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  낮 수집 (launchd)
+
+  12:00에 한 번 깨어나 run.sh scrape를 부른다. 수집 + 두 축 판정만 한다
+  (cli.py scrape --check-session) — 지원준비(night-cycle)는 이 잡이 안 건드린다.
+
+  02:00(com.autoapply.night)에서 수집을 떼어낸 이유(2026-08-16): night-cycle이
+  수집까지 같이 하고 있어서, 텔레그램 /apply로 지원준비만 급히 부를 때도
+  매번 수 분짜리 전체 수집이 딸려 왔다. 수집은 하루 한 번이면 충분하고
+  (같은 날 안에 대기열이 크게 안 바뀐다), 지원준비는 그보다 자주(또는 즉시)
+  부를 일이 있어 시각을 분리했다.
+
+  낮 12시로 고른 이유: 새벽(night)과 아침(flush) 사이가 아니라 그 뒤로 —
+  밤사이 준비한 결과가 아침에 먼저 나가고, 그날 새로 올라온 공고를 다음날
+  새벽 지원준비가 쓸 수 있게 낮에 미리 모아둔다.
+
+  RunAtLoad를 끈 이유: 맥북을 열 때마다 돌면 예측이 안 된다.
+  맥이 잠들어 12:00을 놓치면 launchd가 깨어난 직후 한 번 실행해 준다.
+
+  설치: schedule/install.sh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.autoapply.scrape</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/schedule/run.sh</string>
+        <string>scrape</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>12</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/logs/scrape.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/logs/scrape.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+</dict>
+</plist>

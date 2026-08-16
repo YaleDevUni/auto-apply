@@ -328,20 +328,20 @@ def main() -> int:
 
 
 def _night_cycle(target: int, *, defer: bool = False) -> dict:
-    """수집 한 번 → 지원준비(dry-run)를 목표건수 또는 대기열 소진까지 반복한다.
+    """지원준비(dry-run)를 목표건수 또는 대기열 소진까지 반복한다.
 
-    수집을 준비마다 반복하지 않는다. 같은 새벽 시간대엔 새 공고가 계속 올라오지
-    않으므로, 한 번 모아둔 대기열을 `next_targets`가 더 못 주는 시점이 곧
-    "더 지원할 게 없다"는 판정이다 — 거기서 멈춘다.
+    수집은 여기서 하지 않는다 — `cli.py scrape`가 별도 스케줄(정오, 하루 한 번)로
+    돈다. 지원준비는 이미 수집·판정된 대기열(`v_actionable`)에서만 고른다.
+    둘을 묶어뒀을 때는 `/apply`처럼 준비만 급히 부르고 싶을 때도 매번
+    전체 수집(수 분)이 같이 돌아 목적과 안 맞았다 — 수집은 하루에 한 번이면
+    충분하고, 준비는 그보다 훨씬 자주(또는 즉시) 부를 일이 있다.
 
     `cycle-apply`를 limit=1로 반복 호출하는 이유: 그쪽이 이미 스킵·재사용·
     알림 로직을 갖고 있다. 여기서 다시 구현하면 두 경로가 갈라져 한쪽만
     고치는 버그가 난다.
     """
-    from src.autoapply import health
     from src.autoapply.db import connect as _connect
     from src.autoapply.notify.listener import is_paused
-    from src.autoapply.runner import check_all
 
     log = logging.getLogger(__name__)
 
@@ -351,11 +351,6 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
             return {"skipped": "일시정지 상태 (텔레그램 /resume 으로 해제)"}
     finally:
         conn.close()
-
-    session_ok = check_all()
-    scraped = pipeline.run_all(session_ok=session_ok)
-    agent.notify_login_required()
-    findings = health.run().get("findings", [])
 
     prepared, attempted, items = 0, 0, []
     seen_ids: set[int] = set()
@@ -418,8 +413,6 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
         "prepared": prepared,
         "attempted": attempted,
         "stopped_reason": "목표 도달" if prepared >= target else "대기열 소진",
-        "scraped": scraped,
-        "health_findings": findings,
         "self_diagnosed": self_diagnosed,
         "items": items,
     }

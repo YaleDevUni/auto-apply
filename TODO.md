@@ -190,6 +190,16 @@ flowchart TD
       `com.autoapply.listen`은 유지. 검증: `launchctl list`로 cycle 사라짐·
       night/flush 등록 확인, `kickstart -p`로 flush 실제 실행해 run.sh가
       인자를 받아 옳은 분기를 타는지 확인(sent:0으로 정상 종료)
+- [x] **수집을 지원준비에서 분리, 낮 12시 별도 스케줄로** (2026-08-16 지시).
+      `night-cycle`이 수집(수 분)까지 매번 같이 하고 있어서, 텔레그램 `/apply`로
+      지원준비만 급히 부를 때도 전체 수집이 딸려 왔다. `cli.py scrape
+      --check-session`을 `com.autoapply.scrape`(12:00)로 분리하고,
+      `night-cycle`은 이미 모아둔 대기열에서만 고르게 정리. 검증: `_night_cycle`
+      리팩터 후 `target=0`으로 실행해 스크래핑 없이(서브프로세스 호출도 없이)
+      정상 반환하는 것 확인, `schedule/install.sh`로 4개 잡(scrape·night·flush·
+      listen) 전부 재등록해 `launchctl list`로 확인(listen이 bootout/bootstrap
+      경합으로 한 번 실패했다가 재시도로 정상화 — install.sh는 순차 실행이라
+      드물게 이 경합이 날 수 있다는 걸 남겨둔다).
 - [ ] 끝나면 텔레그램으로 완료 보고
 
 ### P1 — 커버리지

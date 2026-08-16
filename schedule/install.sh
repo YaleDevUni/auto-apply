@@ -4,7 +4,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$HOME/Library/LaunchAgents" "$REPO/data/logs"
 
-# night  — 02:00 한 번. 수집 → 지원준비를 목표건수/대기열 소진까지. 알림은 안 보냄
+# scrape — 12:00 한 번. 수집 + 판정만
+# night  — 02:00 한 번. 지원준비를 목표건수/대기열 소진까지(수집은 안 함). 알림은 안 보냄
 # flush  — 09:00 한 번. 밤사이 쌓인 알림을 몰아서 보냄
 # listen — 상시 대기. 폰에서 온 메시지·버튼에 즉시 답한다
 #
@@ -13,7 +14,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$REPO/data/logs"
 launchctl bootout "gui/$UID/com.autoapply.cycle" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.autoapply.cycle.plist"
 
-for LABEL in com.autoapply.night com.autoapply.flush com.autoapply.listen; do
+for LABEL in com.autoapply.scrape com.autoapply.night com.autoapply.flush com.autoapply.listen; do
   DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
   sed -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" "$REPO/schedule/$LABEL.plist" > "$DEST"
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
@@ -24,4 +25,4 @@ done
 echo
 echo "해제:   launchctl bootout gui/$UID/<라벨>"
 echo "즉시실행: launchctl kickstart -p gui/$UID/com.autoapply.night"
-echo "로그:   tail -f $REPO/data/logs/night.out.log $REPO/data/logs/flush.out.log $REPO/data/logs/listen.out.log"
+echo "로그:   tail -f $REPO/data/logs/scrape.out.log $REPO/data/logs/night.out.log $REPO/data/logs/flush.out.log $REPO/data/logs/listen.out.log"
