@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
 import sys
@@ -515,6 +516,19 @@ def _revise(job_id: int, feedback: str) -> dict:
 
     log = logging.getLogger(__name__)
     log.info("공고 %s 재작성 — %s", job_id, feedback[:80])
+
+    # 원장에 먼저 남긴다. 그래야 이번 지시가 원장에 들어간 상태로 조립되고,
+    # 같은 공고에 두 번째 요청이 와도 첫 번째가 남아 있다.
+    #
+    # 기록한 줄은 폰으로 되돌려준다. 요약이 지시를 잘못 옮기는 경우가 있는데
+    # (특히 '짧게' 같은 한 단어), 그 줄은 앞으로 모든 이력서 프롬프트에 실려
+    # 나가므로 사람이 바로 알아보고 파일에서 고칠 수 있어야 한다.
+    try:
+        entry = assemble.append_revision(job_id, feedback)
+        _tell(f"📒 <b>원장 기록</b>\n<code>{html.escape(entry)}</code>\n"
+              f"<i>틀렸으면 {assemble.REVISION_LOG.name} 에서 그 줄을 고치세요.</i>")
+    except Exception as e:  # noqa: BLE001
+        log.warning("원장 기록 실패(재작성은 계속): %s", e)
 
     built = assemble.build_editor_json(job_id, feedback=feedback)
     if not built["ok"]:

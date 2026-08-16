@@ -52,6 +52,13 @@ RESUME_SRC_DIR = PROFILE_DIR / "resume"
 # 공고별로 조립된 결과. 지원 원장과 짝을 이뤄 "무엇을 보냈는지"를 남긴다.
 RESUME_OUT_DIR = PROFILE_DIR / "generated"
 
+# 사람이 준 수정 요청의 원장. 이력서를 쓸 때 가이드와 **함께** 읽는다.
+#
+# RESUME_SRC_DIR 밖에 두는 이유: load_guide()가 그 폴더의 .md를 전부 합쳐
+# 사실 저장소로 넘긴다. 원장이 거기 섞이면 "지난번에 이렇게 고쳐달라고 했다"가
+# "이것이 규칙이다"와 구분되지 않는다. 둘은 무게가 다르다.
+REVISION_LOG = PROFILE_DIR / "revision-log.md"
+
 RESUME_PATH = PROFILE_DIR / "resume.md"
 CREDENTIALS_PATH = PROFILE_DIR / "credentials.json"
 

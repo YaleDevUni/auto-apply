@@ -35,7 +35,7 @@ from typing import Any
 from . import llm
 from .config import effective_config
 from .db import connect, now
-from .paths import RESUME_OUT_DIR, RESUME_SRC_DIR
+from .paths import RESUME_OUT_DIR, RESUME_SRC_DIR, REVISION_LOG
 
 log = logging.getLogger(__name__)
 
@@ -79,13 +79,181 @@ class NoGuide(RuntimeError):
 
 
 def load_guide() -> str:
-    """profile/resume/ 의 모든 .md를 합쳐 사실 저장소로 넘긴다."""
+    """profile/resume/ 의 모든 .md를 합쳐 사실 저장소로 넘긴다.
+
+    수정 원장(revision-log.md)은 여기 섞지 않는다. 원장이 폴더 안으로 옮겨져도
+    걸러지도록 이름으로 한 번 더 막는다 — 원장은 '지난번 요청'이고 가이드는
+    '규칙'이라, 같은 무게로 읽히면 한 공고의 특수한 요구가 규칙이 된다.
+    """
     if not RESUME_SRC_DIR.is_dir():
         raise NoGuide(f"이력서 원본 디렉터리가 없다: {RESUME_SRC_DIR}")
-    files = sorted(RESUME_SRC_DIR.rglob("*.md"))
+    files = [f for f in sorted(RESUME_SRC_DIR.rglob("*.md")) if f.name != REVISION_LOG.name]
     if not files:
         raise NoGuide(f"{RESUME_SRC_DIR} 에 .md 파일이 없다")
     return "\n\n".join(f"<!-- {f.name} -->\n{f.read_text(encoding='utf-8')}" for f in files)
+
+
+# ── 수정 요청 원장 ────────────────────────────────────────────────────────
+#
+# 사람이 "이건 빼줘"라고 하면 그 지시는 재작성 한 번에만 쓰이고 사라졌다.
+# 같은 공고에 두 번째 요청이 오면 첫 번째를 잊었고, 다음 공고에서는 같은 말을
+# 다시 해야 했다.
+#
+# 원장은 지시 하나를 한 줄로 남긴다. **지시만 남기면 안 된다** — "인프라 빼줘"는
+# 그 공고가 프론트엔드였기 때문에 옳은 말이지, 언제나 옳은 말이 아니다.
+# 그래서 지시와 함께 **왜 그때 그게 맞았는지**를 공고 근거로 붙인다.
+#
+# 반복되는 지적은 원장이 아니라 resume-guide.md 로 올라가야 한다. 그건 사람이
+# 정한다 — 한 공고의 특수한 요구가 규칙이 되면 이후 모든 이력서가 조용히 오염된다.
+
+LOG_HEADER = """# 수정 요청 원장
+
+사람이 재작성을 요청할 때마다 한 줄씩 쌓인다. 이력서를 쓸 때 작성 가이드와 함께 읽는다.
+
+각 줄은 **지시 + 그때 그게 맞았던 이유(공고 근거)** 다. 근거가 없으면 다음 공고에서
+잘못 적용된다. 같은 지적이 반복되면 그건 여기가 아니라 `resume/resume-guide.md`에
+규칙으로 올라가야 한다는 신호다.
+
+"""
+
+# 프롬프트에 넣을 최대 줄 수. 원장 자체는 계속 쌓이고, 읽을 때만 최근 것을 자른다.
+LOG_READ_LIMIT = 60
+
+def _log_entries() -> list[str]:
+    if not REVISION_LOG.exists():
+        return []
+    return [ln.rstrip() for ln in REVISION_LOG.read_text(encoding="utf-8").splitlines()
+            if ln.startswith("- ")]
+
+
+def load_revision_log(job_id: int | None = None) -> str:
+    """프롬프트에 넣을 원장 블록. 없으면 빈 문자열.
+
+    이 공고에 이미 받은 지시는 따로 떼어 앞에 놓는다. 섞어두면 모델이 남의
+    공고 지시를 이 공고에 적용하거나, 반대로 방금 받은 지시를 흘려보낸다.
+    """
+    entries = _log_entries()
+    if not entries:
+        return ""
+
+    mine: list[str] = []
+    if job_id is not None:
+        mark = f"#{job_id} "
+        mine = [e for e in entries if mark in e]
+
+    recent = [e for e in entries if e not in mine][-LOG_READ_LIMIT:]
+    out = "\n# 수정 요청 원장\n"
+
+    if mine:
+        out += (
+            "\n## 이 공고에 이미 받은 지시 — 전부 지킨다\n"
+            "아래는 같은 공고에서 사람이 이미 요청한 것이다. 이번 지시만 반영하고\n"
+            "이걸 되돌리면 사람이 같은 말을 또 해야 한다.\n"
+            + "\n".join(mine) + "\n"
+        )
+
+    if recent:
+        out += (
+            "\n## 다른 공고에서 받은 지시\n"
+            "각 줄은 `지시. 근거` 형태다. 근거를 보고 적용 여부를 정한다:\n"
+            "- 근거가 공고 내용이면 → **이 공고에도 같은 근거가 성립할 때만** 적용한다.\n"
+            "- 근거가 `취향 — 공고와 무관` 이면 → 공고를 가리지 않고 적용한다.\n"
+            + "\n".join(recent) + "\n"
+        )
+    return out
+
+
+def _condense(job: dict[str, Any], feedback: str) -> str:
+    """지시를 공고 근거와 함께 한두 줄로 줄인다.
+
+    본 조립과 같은 호출에 태우지 않고 따로 부르는 이유: 편집기 JSON 스키마에
+    필드를 하나 더 얹으면 그 내용이 이력서 본문으로 새어 나온 전례가 있다
+    (간단 소개 맨 앞에 판단 근거가 그대로 찍혔다). 원장은 제출물이 아니므로
+    제출물을 만드는 호출과 섞지 않는다.
+    """
+    cfg = effective_config().get("llm", {})
+    prompt = f"""사람이 이력서 재작성을 요청했다. 그 지시가 이것이다:
+
+    「{feedback}」
+
+이걸 원장에 남길 **한 줄**로 정리하라. 지시가 이미 짧으면 거의 그대로 옮긴다 —
+줄일 것이 없다고 판단해 되묻지 마라. 위 따옴표 안이 지시의 전부이고, 그것으로 충분하다.
+지시에 없는 내용을 보태거나 다른 지시로 바꾸지 않는다.
+
+형식 — 이 형식만 출력한다. 앞뒤에 다른 말을 붙이지 않는다:
+{{지시 요약}}. {{공고 근거}}
+
+근거는 **지시가 무엇을 건드리는지**로 갈린다. 둘 중 하나다:
+
+(가) **무엇을 쓸지** — 어떤 경험·기술·프로젝트를 넣고 뺄지, 무엇을 앞세울지.
+     → 공고 근거를 쓴다. [채용공고]에서 **실제로 읽히는 사실**로,
+       그 자리가 무엇을 요구하는지 / 어떤 기술이 요건에 있고 없는지를 근거로 든다.
+     → 이 지시가 옳은 이유는 이 공고가 그런 자리이기 때문이므로, 근거 없이는 남기면 안 된다.
+
+(나) **어떻게 쓸지** — 문장·분량·표기·형식.
+     → 정확히 `취향 — 공고와 무관` 이라고만 쓴다. 공고에서 근거를 찾지 마라.
+
+애매하면 물어라: 「다른 공고였다면 이 지시가 달라졌을까?」 달라지면 (가)다.
+
+**근거를 지어내지 마라.** 공고에서 아무 사실이나 끌어와 붙이면 안 된다.
+근거는 *이력서를 그렇게 써야 하는 이유*여야지, 공고 자체의 특징이면 안 된다.
+
+그 외:
+- 전체 200자 이내, 줄바꿈 없이 한 줄.
+
+아래는 **형식 예시일 뿐이다. 예시의 내용을 가져다 쓰지 마라** — 위 따옴표 안의
+지시만 정리한다. 지시가 한 단어여도 그 한 단어를 정리하지, 예시로 바꾸지 않는다.
+
+(가) `공고와 무관한 인프라 경험 제외 요청. 프론트엔드 개발직이고 요구·우대·기술스택 어디에도 인프라 없음`
+(가) `해외 영업 경험을 앞에. 수출 담당 자리이고 주요업무가 해외 바이어 발굴`
+(나) `간단 소개를 더 짧게. 취향 — 공고와 무관`
+(나) `문장 끝을 명사형으로 통일. 취향 — 공고와 무관`
+     ↑ 공고 본문의 문체를 근거로 대면 안 된다. 이력서 문체는 어느 공고에서나 같다.
+
+# 채용공고
+{_jd_block(job)[:3000]}"""
+    out = llm.ask(prompt, model=cfg.get("review_model", "claude-haiku-4-5-20251001"))
+    return " ".join(out.strip().splitlines()).strip()[:220]
+
+
+# 요약 대신 사람에게 되묻거나 설명을 늘어놓은 응답. 짧은 지시에서 실제로 나왔다
+# ("수정 요청 내용이 제공되지 않았습니다"). 이런 줄이 원장에 박히면 지워질 때까지
+# 모든 이력서 프롬프트에 실려 나가므로, 통과시키느니 원문을 남긴다.
+_META = re.compile(r"제공되지|제공된 \[|알려주시|해드리|드리겠|확인할 수 없|필요한데")
+
+
+def append_revision(job_id: int, feedback: str, job: dict[str, Any] | None = None) -> str:
+    """수정 요청을 원장에 한 줄 남기고 그 줄을 돌려준다.
+
+    재작성 **전에** 부른다. 그래야 이번 지시도 원장에 들어간 상태로 조립되고,
+    다음 요청이 와도 이번 것이 남아 있다.
+
+    요약에 실패해도 원장 기록을 건너뛰지 않는다 — 원문 그대로라도 남기는 편이
+    아무것도 안 남기는 것보다 낫다. 여기서 예외를 올리면 재작성 자체가 막힌다.
+    """
+    job = job or load_job(job_id)
+    raw = " ".join(feedback.split())[:220]
+    try:
+        line = _condense(job, feedback)
+        if _META.search(line) or not line:
+            log.warning("원장 요약이 되묻는 응답이라 원문으로 남긴다: %s", line[:80])
+            line = f"{raw} (요약 실패 — 근거 미확인)"
+    except Exception as e:  # noqa: BLE001
+        log.warning("원장 요약 실패, 원문으로 남긴다: %s", e)
+        line = f"{raw} (요약 실패 — 근거 미확인)"
+
+    track = job.get("track_label") or "-"
+    entry = (f"- {now()[:10]} · #{job_id} {job['company']} {job['title'][:40]}"
+             f"({track}) — {line}")
+
+    REVISION_LOG.parent.mkdir(parents=True, exist_ok=True)
+    if not REVISION_LOG.exists():
+        REVISION_LOG.write_text(LOG_HEADER, encoding="utf-8")
+    with REVISION_LOG.open("a", encoding="utf-8") as f:
+        f.write(entry + "\n")
+
+    log.info("원장 기록: %s", entry)
+    return entry
 
 
 def load_job(job_id: int, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
@@ -148,7 +316,7 @@ def write(job: dict[str, Any], guide: str, feedback: str = "") -> str:
 
 # 채용공고
 {_jd_block(job)}
-{fix}"""
+{load_revision_log(job.get("id"))}{fix}"""
     return llm.ask(prompt)
 
 
@@ -403,7 +571,7 @@ def build_editor_json(
 
 # 채용공고
 {_jd_block(job)}
-{_track_block(job)}{_revision_block(feedback)}"""
+{load_revision_log(job_id)}{_track_block(job)}{_revision_block(feedback)}"""
 
     raw = llm.ask(prompt)
     data = _parse_json(raw)
