@@ -297,6 +297,11 @@ def mark_failed(
     own = conn is None
     conn = conn or connect()
     try:
+        row = conn.execute(
+            "SELECT job_id, platform, evidence_path FROM apply_ledger WHERE id=?",
+            (ledger_id,),
+        ).fetchone()
+
         if release:
             conn.execute("DELETE FROM apply_ledger WHERE id=?", (ledger_id,))
         else:
@@ -305,6 +310,24 @@ def mark_failed(
                 (error, ledger_id),
             )
         conn.commit()
+
+        # 고장 큐에 남긴다. 원장의 failed 행만으로는 self_items()가 미리 정의한
+        # 증상(플랫폼별 2건 이상)에만 걸려서, 처음 보는 실패는 아무 데도 안 남았다.
+        # 증적 경로를 같이 넘긴다 — 계획 에이전트가 화면을 읽어야 셀렉터를
+        # 추측이 아니라 근거로 고친다.
+        from . import errors
+
+        errors.record(
+            conn, kind="apply",
+            exc_type=type(error).__name__ if isinstance(error, BaseException) else "ApplyFailed",
+            message=str(error),
+            command=f"apply {row['job_id']}" if row else "apply",
+            context={
+                "job_id": row["job_id"] if row else None,
+                "platform": row["platform"] if row else None,
+                "evidence_path": row["evidence_path"] if row else None,
+            },
+        )
     finally:
         if own:
             conn.close()

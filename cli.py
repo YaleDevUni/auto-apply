@@ -1250,12 +1250,27 @@ if __name__ == "__main__":
                          ensure_ascii=False, indent=2))
         raise SystemExit(0) from None
     except BaseException as e:  # noqa: BLE001
+        # 여기가 모든 명령의 마지막 그물이다. 예전에는 폰으로 한 줄 보내고
+        # 끝이라 그 메시지를 놓치면 고장이 어디에도 안 남았다. 이제 큐에
+        # 적는다 — errors.record()가 분류(바깥 사정 / 우리 문제)와 알림까지
+        # 맡고, 우리 문제면 계획 수립을 발동한다.
         cmd = " ".join(sys.argv[1:])[:150]
         try:
-            _tell(
-                f"❌ <b>cli.py 처리 안 된 오류</b>\n<code>{html.escape(cmd)}</code>\n"
-                f"<i>{type(e).__name__}: {str(e)[:300]}</i>"
-            )
+            from src.autoapply import errors
+
+            conn = connect()
+            try:
+                errors.record(conn, kind="cli", exc=e, command=cmd)
+            finally:
+                conn.close()
         except Exception:  # noqa: BLE001
-            pass
+            # 기록조차 실패하면 최소한 폰에는 남긴다. 여기서 또 터지면
+            # 원래 고장이 무엇이었는지가 통째로 사라진다.
+            try:
+                _tell(
+                    f"❌ <b>cli.py 처리 안 된 오류</b>\n<code>{html.escape(cmd)}</code>\n"
+                    f"<i>{type(e).__name__}: {str(e)[:300]}</i>"
+                )
+            except Exception:  # noqa: BLE001
+                pass
         raise

@@ -311,6 +311,66 @@ CREATE TABLE IF NOT EXISTS running_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_running_open ON running_tasks(finished_at);
 
+-- ─────────────────────── 자가복구 ───────────────────────
+
+-- 고장 큐. 예전에는 에러가 폰 메시지 한 줄로 날아가고 사라졌다 — 그 메시지를
+-- 놓치면 그 고장은 어디에도 안 남았다. self_items()가 읽는 신호는 미리 정의한
+-- 몇 가지 증상뿐이라 처음 보는 고장은 못 잡는다.
+--
+-- fingerprint가 이 표의 핵심이다. 같은 고장이 100번 나도 행은 하나고 count만
+-- 는다. 이게 없으면 반복 에러가 큐를 도배해서, 쌓인 것을 읽고 계획을 세우는
+-- 일 자체가 무의미해진다.
+--
+-- 행을 지우지 않고 status='fixed'로 두는 이유: 같은 지문이 다시 오면 "고쳤는데
+-- 또 났다"를 알아야 한다. 그건 처음 난 고장과 다른 종류의 신호다.
+CREATE TABLE IF NOT EXISTS error_queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    class       TEXT NOT NULL,          -- external(바깥 사정) | actionable(우리 문제)
+    kind        TEXT NOT NULL,          -- cli | apply | editor ...
+    command     TEXT,                   -- 어떤 명령에서 났나
+    exc_type    TEXT,
+    message     TEXT,
+    traceback   TEXT,
+    context     TEXT,                   -- JSON. job_id·platform·evidence_path 등
+    count       INTEGER NOT NULL DEFAULT 1,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open',  -- open|planned|fixing|fixed|dismissed
+    plan_id     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_error_status ON error_queue(status, class);
+
+-- 계획 에이전트가 만든 수정 계획. 수행 에이전트는 이것만 읽고 새 세션에서
+-- 시작한다.
+--
+-- 표에 굳혀두는 이유는 승인 지연이다. 새벽 3시에 만든 계획의 승인 버튼은
+-- 아침에나 눌린다 — 한 세션이 그동안 떠 있을 수 없다. 계획을 여기 적어두면
+-- 계획 세션은 그 자리에서 끝나고, 승인이 왔을 때 새 프로세스가 이어받는다.
+-- 덤으로 계획 세션이 코드를 뒤지며 쌓은 컨텍스트가 수행 세션에 안 딸려온다.
+CREATE TABLE IF NOT EXISTS fix_plans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    sources     TEXT NOT NULL DEFAULT '[]', -- JSON. 어느 에러/지시에서 나왔나
+    title       TEXT NOT NULL,
+    cause       TEXT,                       -- 원인 가설
+    files       TEXT,                       -- JSON. 고치려는 파일
+    steps       TEXT,                       -- JSON. 수행 단계
+    verify      TEXT,                       -- 실제로 돌릴 검증 명령
+    raw         TEXT,                       -- 계획 원문(파싱 실패 시 사람이 본다)
+    risk        TEXT,                       -- low | medium | high
+    auto        INTEGER NOT NULL DEFAULT 0, -- 자동반영 대상으로 판정됐나
+    -- pending(승인대기) | approved | rejected | running | done | failed
+    -- | demoted(자동반영 하려다 검증/검사에 걸려 승인대기로 내려온 것)
+    status      TEXT NOT NULL DEFAULT 'pending',
+    decided_at  TEXT,
+    branch      TEXT,
+    commit_sha  TEXT,                       -- 자동반영으로 main에 남긴 커밋
+    result      TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fix_plans_status ON fix_plans(status, id);
+
 -- ─────────────────────── 에이전트 조회면 ───────────────────────
 
 -- 에이전트는 이 뷰 하나만 읽는다. 다섯 테이블을 머릿속에서 JOIN하게 하지 않는다.
