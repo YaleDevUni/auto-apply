@@ -18,7 +18,7 @@ import json
 import logging
 import sys
 
-from src.autoapply import agent, pipeline, tasks
+from src.autoapply import agent, llm, pipeline, tasks
 from src.autoapply.adapters import REGISTRY
 from src.autoapply.db import connect, now
 from src.autoapply.notify import telegram
@@ -447,10 +447,16 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
     finally:
         conn.close()
 
+    from src.autoapply import errors
+
     prepared, attempted, items = 0, 0, []
     seen_ids: set[int] = set()
     stopped_by_human = False
     skipped_applied = 0   # 이미 지원한 자리 — 목표에도, 실패에도 안 넣는다
+    # 같은 오류가 몇 번 났나. 지문(숫자·경로를 지운 메시지)으로 센다 —
+    # 공고 id만 다른 같은 고장이 매번 다른 오류로 보이면 셀 수가 없다.
+    fail_counts: dict[str, int] = {}
+    tripped: tuple[str, int] | None = None
     while prepared < target:
         # 건과 건 사이가 접기 좋은 자리다. 한 건은 이력서 등록까지 묶여 있어
         # 중간에 끊으면 절반만 채워진 이력서가 계정에 남는다.
@@ -475,6 +481,16 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
             ok = not (it.get("error") or it.get("stopped") or apply_err)
             if ok:
                 prepared += 1
+            elif not it.get("already_applied"):
+                # **실패는 목표를 못 채우므로 루프를 못 멈춘다.** 예전에는 멈추는
+                # 조건이 셋뿐이었다 — 사람 중단 / 대기열 소진 / 같은 job_id 재등장.
+                # 그래서 claude 하나가 죽으면 대기열이 빌 때까지 계속 다음 공고로
+                # 갔다(실측 2026-08-17: actionable 122건이 그 앞에 있었다).
+                # 같은 오류가 세 번 났으면 다음 공고에서도 같은 자리에서 죽는다.
+                key = errors.normalize(str(it.get("error") or apply_err))
+                fail_counts[key] = fail_counts.get(key, 0) + 1
+                if fail_counts[key] >= CIRCUIT_BREAK_REPEATS:
+                    tripped = (key, fail_counts[key])
             # 이미 지원한 자리는 목표 건수에 넣지 않는다(ok=False라 이미 안 센다).
             # 다만 실패로 세지도 않는다 — 고칠 게 없는 정상 동작이다. 그래서
             # 따로 세어 보고에만 남긴다.
@@ -491,7 +507,7 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
                             it["job_id"])
                 stall = True
             seen_ids.add(it["job_id"])
-        if stall:
+        if stall or tripped:
             break
 
     # 자기개선은 더는 시간이 되면 자동으로 안 돈다 — 문제가 자체진단됐을 때만.
@@ -518,6 +534,9 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
 
     if stopped_by_human:
         reason = "중단됨(사람 요청)"
+    elif tripped:
+        reason = f"같은 오류 {tripped[1]}번 — 전면 중지"
+        _report_circuit_break(tripped[0], tripped[1], prepared, attempted)
     elif prepared >= target:
         reason = "목표 도달"
     else:
@@ -531,6 +550,38 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
         "self_diagnosed": self_diagnosed,
         "items": items,
     }
+
+
+# 같은 오류가 이만큼 반복되면 대기열이 남아 있어도 접는다. 셋인 이유: 한 번은
+# 그 공고만의 사정일 수 있고, 두 번은 우연일 수 있다. 세 번이면 다음 공고에서도
+# 같은 자리에서 죽는다 — 그 시점부터 남은 대기열은 전부 같은 실패다.
+CIRCUIT_BREAK_REPEATS = 3
+
+
+def _report_circuit_break(key: str, count: int, prepared: int, attempted: int) -> None:
+    """왜 대기열이 남았는데 멈췄는지 폰에 알린다.
+
+    이 알림이 없으면 "목표 5건인데 2건만 하고 끝났다"가 대기열 소진과 구별되지
+    않는다. 둘은 정반대다 — 하나는 할 일이 없는 것이고 하나는 망가진 것이다.
+    """
+    import html
+
+    from src.autoapply.db import connect as _c
+    from src.autoapply.notify import telegram
+
+    conn = _c()
+    try:
+        telegram.notify(
+            conn,
+            f"🛑 <b>같은 오류가 {count}번 — 지원준비를 접습니다</b>\n\n"
+            f"<i>{html.escape(key[:250])}</i>\n\n"
+            f"준비 {prepared}건 / 시도 {attempted}건에서 멈췄습니다. "
+            "대기열은 남아 있지만 다음 공고도 같은 자리에서 죽습니다.\n"
+            "<i>고장 큐에 쌓였습니다 — <code>/errors</code> 로 보고 "
+            "<code>/plan</code> 으로 수정 계획을 세울 수 있습니다.</i>",
+        )
+    finally:
+        conn.close()
 
 
 def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
@@ -581,6 +632,15 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
             # 쌓이는 이력서는 `resumes --cleanup`이 치운다 —
             # `made_resumes`에 우리가 만든 것이 남으므로 근거가 있다.
             r = _autoapply(t["job_id"], resume_url=None, live=False)
+        except (llm.UsageLimited, llm.LoginExpired, llm.ClaudeUnavailable):
+            # **다음 공고로 넘어가지 않는다.** 이력서는 LLM 없이 못 만들므로
+            # 다음 공고도 같은 자리에서 죽는다. 여기서 삼켜 한 건의 실패로
+            # 만들면 서킷브레이커가 세 번 셀 때까지 세 건을 더 태운다 —
+            # 셀 것도 없이 확실한 실패다.
+            #
+            # 위로 올리면 night-cycle이 통째로 접히고 cli.py 최상단이
+            # errors.record로 원인을 폰에 보낸다(한도인지 로그인 만료인지까지).
+            raise
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
