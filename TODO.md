@@ -134,6 +134,11 @@ flowchart TD
       실측으로 확인. `screenshot()` 실패 시 표시만 남기고 다음 세션 시작
       때 자동 재시작하게 만들어 사람 개입 없이 회복. 자세한 내용은
       [NEXT.md](NEXT.md) `## 완료` 참고
+- [x] **LLM 호출마다 토큰·비용을 job_id로 기록** (2026-08-16 지시) —
+      write·review·to_editor_json·portfolio_match·summary_ensure·
+      revision_summary·guide_edit·vision 전부 `llm_calls` 테이블에 남는다.
+      `cli.py llm-cost <job_id>`로 공고 하나에 LLM을 얼마나 썼는지, 인자
+      없이 부르면 최근 20건 요약을 본다. 실제 호출로 기록·조회 확인.
 
 ---
 

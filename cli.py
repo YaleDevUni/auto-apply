@@ -61,6 +61,9 @@ def main() -> int:
     sub.add_parser("blocked", help="막힌 이유 집계")
     sub.add_parser("quota", help="오늘 남은 지원 가능 건수")
 
+    lcp = sub.add_parser("llm-cost", help="LLM 토큰·비용 — 공고별 또는 최근 전체")
+    lcp.add_argument("job_id", type=int, nargs="?", help="생략하면 최근 공고 20건 요약")
+
     sub.add_parser("browser-open", help="상주 브라우저 창을 띄운다 (한 번만 하면 된다)")
     sub.add_parser("browser-restart", help="상주 브라우저를 껐다 켠다 (렌더러가 멎었을 때)")
 
@@ -197,6 +200,8 @@ def main() -> int:
         _out(agent.blocked_summary())
     elif args.cmd == "quota":
         _out(agent.quota())
+    elif args.cmd == "llm-cost":
+        _out(_llm_cost(args.job_id))
     elif args.cmd == "browser-open":
         _out(_browser_open())
     elif args.cmd == "browser-restart":
@@ -590,6 +595,7 @@ def _report_prepared(target: dict, result: dict, *, defer: bool = False) -> None
                 "이력서 문서: 이름·간단 소개·경력·학력·스킬이 채워져 있고, "
                 "문장이 중간에 끊기거나 빈 섹션이 없어야 한다.",
                 context="지원에 제출될 이력서 문서",
+                job_id=target.get("job_id"),
             )
             if v["ok"] is False and v["issues"]:
                 verdict = "\n⚠️ " + "\n⚠️ ".join(i.lstrip("- ")[:70] for i in v["issues"][:3])
@@ -799,6 +805,62 @@ def _tell(text: str) -> None:
         telegram.notify(conn, text)
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning("알림 실패: %s", e)
+    finally:
+        conn.close()
+
+
+def _llm_cost(job_id: int | None) -> dict:
+    """LLM 호출 비용을 job_id로 묶어 보여준다.
+
+    write·review·to_editor_json·portfolio_match·summary_ensure가 로그
+    파일 여기저기 흩어져 있어, "이 공고 하나에 LLM을 얼마나 썼나"를
+    답하려면 이 집계가 필요하다(`llm_calls` 테이블, `llm.py _log_cost` 참고).
+    """
+    conn = connect()
+    try:
+        if job_id is not None:
+            rows = conn.execute(
+                """SELECT phase, COUNT(*) AS calls,
+                          SUM(input_tokens) AS in_tok, SUM(output_tokens) AS out_tok,
+                          SUM(cost_usd) AS cost
+                   FROM llm_calls WHERE job_id=? GROUP BY phase ORDER BY phase""",
+                (job_id,),
+            ).fetchall()
+            if not rows:
+                return {"job_id": job_id, "안내": "기록 없음 — 아직 조립 안 했거나 이 기능 이전 데이터"}
+            total = conn.execute(
+                """SELECT COUNT(*) AS calls, SUM(input_tokens) AS in_tok,
+                          SUM(output_tokens) AS out_tok, SUM(cost_usd) AS cost
+                   FROM llm_calls WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+            return {
+                "job_id": job_id,
+                "phases": [
+                    {"phase": r["phase"], "호출": r["calls"], "입력토큰": r["in_tok"],
+                     "출력토큰": r["out_tok"], "비용_usd": round(r["cost"] or 0, 4)}
+                    for r in rows
+                ],
+                "합계": {"호출": total["calls"], "입력토큰": total["in_tok"],
+                        "출력토큰": total["out_tok"], "비용_usd": round(total["cost"] or 0, 4)},
+            }
+
+        rows = conn.execute(
+            """SELECT l.job_id, j.company, j.title, COUNT(*) AS calls,
+                      SUM(l.input_tokens) AS in_tok, SUM(l.output_tokens) AS out_tok,
+                      SUM(l.cost_usd) AS cost, MAX(l.called_at) AS last
+               FROM llm_calls l LEFT JOIN jobs j ON j.id = l.job_id
+               WHERE l.job_id IS NOT NULL
+               GROUP BY l.job_id ORDER BY last DESC LIMIT 20"""
+        ).fetchall()
+        return {
+            "최근_20건": [
+                {"job_id": r["job_id"], "회사": r["company"], "공고": r["title"],
+                 "호출": r["calls"], "입력토큰": r["in_tok"], "출력토큰": r["out_tok"],
+                 "비용_usd": round(r["cost"] or 0, 4)}
+                for r in rows
+            ],
+        }
     finally:
         conn.close()
 

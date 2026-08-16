@@ -67,7 +67,10 @@ def available() -> bool:
     return llm.cli_available()
 
 
-def ask(shot: str | Path, question: str, *, ignore: str = "") -> str:
+def ask(
+    shot: str | Path, question: str, *, ignore: str = "",
+    job_id: int | None = None, phase: str = "vision",
+) -> str:
     """스크린샷에 대해 자유롭게 묻는다. 레시피 수복처럼 '무엇이 보이나'가 필요할 때.
 
     ignore를 안 주면 `verify()`가 막아둔 오탐이 그대로 돌아온다. 실제로 겪었다:
@@ -84,6 +87,7 @@ def ask(shot: str | Path, question: str, *, ignore: str = "") -> str:
         _HEAD.format(shot=path) + question + tail,
         image_paths=[path],
         model=cfg.get("vision_model", cfg.get("model", "claude-sonnet-5")),
+        job_id=job_id, phase=phase,
     ).strip()
 
 
@@ -93,6 +97,8 @@ def verify(
     *,
     context: str = "웹 화면",
     ignore: str = DEFAULT_IGNORE,
+    job_id: int | None = None,
+    phase: str = "vision_verify",
 ) -> dict[str, Any]:
     """의도한 내용이 화면에 반영됐는지 본다.
 
@@ -108,6 +114,7 @@ def verify(
         out = ask(
             path,
             _VERIFY.format(head="", context=context, ignore=ignore, intent=intent).lstrip(),
+            job_id=job_id, phase=phase,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("비전 점검 실패(무시): %s", e)

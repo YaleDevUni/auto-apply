@@ -157,7 +157,7 @@ def edit(instruction: str) -> dict[str, Any]:
 
     session_id = _session_id()
     try:
-        resp = llm.ask_session(prompt, session_id=session_id or None, model=model)
+        resp = llm.ask_session(prompt, session_id=session_id or None, model=model, phase="guide_edit")
     except RuntimeError:
         # 저장해둔 session_id가 낡았을 수 있다(로컬 세션 기록이 정리됐거나
         # 다른 이유로 --resume이 실패). 한 번은 새 세션으로 다시 시도한다 —
@@ -166,7 +166,7 @@ def edit(instruction: str) -> dict[str, Any]:
             raise
         log.warning("가이드 세션(%s…) 재개 실패 — 새 세션으로 재시도", session_id[:8])
         _remember_session("")
-        resp = llm.ask_session(prompt, session_id=None, model=model)
+        resp = llm.ask_session(prompt, session_id=None, model=model, phase="guide_edit")
     _remember_session(resp["session_id"])
     raw = resp["text"]
 

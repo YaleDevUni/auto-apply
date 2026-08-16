@@ -252,7 +252,10 @@ def _condense(job: dict[str, Any], feedback: str) -> str:
 
 # 채용공고
 {_jd_block(job)[:3000]}"""
-    out = llm.ask(prompt, model=cfg.get("review_model", "claude-haiku-4-5-20251001"))
+    out = llm.ask(
+        prompt, model=cfg.get("review_model", "claude-haiku-4-5-20251001"),
+        job_id=job.get("id"), phase="revision_summary",
+    )
     return " ".join(out.strip().splitlines()).strip()[:220]
 
 
@@ -357,7 +360,7 @@ def write(job: dict[str, Any], guide: str, feedback: str = "") -> str:
 # 채용공고
 {_jd_block(job)}
 {load_revision_log(job.get("id"))}{fix}"""
-    return llm.ask(prompt)
+    return llm.ask(prompt, job_id=job.get("id"), phase="write")
 
 
 def review(job: dict[str, Any], guide: str, resume: str) -> dict[str, Any]:
@@ -385,7 +388,10 @@ def review(job: dict[str, Any], guide: str, resume: str) -> dict[str, Any]:
 # 검수 대상 이력서
 {resume}"""
 
-    out = llm.ask(prompt, model=cfg.get("review_model", "claude-haiku-4-5-20251001")).strip()
+    out = llm.ask(
+        prompt, model=cfg.get("review_model", "claude-haiku-4-5-20251001"),
+        job_id=job.get("id"), phase="review",
+    ).strip()
     ok = out.upper().startswith("OK")
     issues = [] if ok else [ln.strip() for ln in out.splitlines() if ln.strip().startswith("-")]
     return {"ok": ok, "issues": issues, "raw": out}
@@ -613,7 +619,7 @@ def build_editor_json(
 {_jd_block(job)}
 {load_revision_log(job_id)}{_track_block(job)}{_revision_block(feedback)}"""
 
-    raw = llm.ask(prompt)
+    raw = llm.ask(prompt, job_id=job_id, phase="to_editor_json")
     data = _parse_json(raw)
     _strip_reasoning(data)
     _clamp_fields(data)
@@ -760,7 +766,8 @@ def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str
 {guide}
 
 # 채용공고
-{_jd_block(job)}"""
+{_jd_block(job)}""",
+        job_id=job.get("id"), phase="summary_ensure",
     ).strip()
 
     if SUMMARY_MIN <= len(out) <= 900:

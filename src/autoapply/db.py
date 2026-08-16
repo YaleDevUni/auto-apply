@@ -262,6 +262,23 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at  TEXT NOT NULL
 );
 
+-- LLM 호출 하나하나의 토큰·비용 기록. "지원 하나당 리소스를 얼마나 쓰는가"에
+-- 답하려면 write·review·to_editor_json·portfolio_match처럼 흩어진 호출을
+-- job_id로 다시 묶을 수 있어야 한다 — 로그 파일만으로는 그 자리에서 세는
+-- 수밖에 없다. job_id가 없는 호출(가이드 편집 등)은 NULL로 남긴다.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id        INTEGER,
+    phase         TEXT NOT NULL,   -- write|review|to_editor_json|portfolio_match|summary_ensure|revision_summary|guide_edit|vision|...
+    model         TEXT,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    cost_usd      REAL,
+    duration_ms   INTEGER,
+    called_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_job ON llm_calls(job_id);
+
 -- 새벽 루프가 만든 지원 준비 알림. 만드는 자리에서 바로 보내면 자는 동안
 -- 계속 폰이 울린다 — 그래서 여기 쌓아두고 flush가 9시에 순서대로 보낸다.
 -- 텔레그램으로 사람이 직접 부른 건(즉시 알림 모드) 이 표를 거치지 않는다.

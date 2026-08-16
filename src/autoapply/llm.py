@@ -127,8 +127,15 @@ def ask(
     timeout: int | None = None,
     thinking_tokens: int | None = None,
     system_prompt: str = WRITER_SYSTEM_PROMPT,
+    job_id: int | None = None,
+    phase: str = "",
 ) -> str:
-    """프롬프트를 던지고 텍스트 응답을 받는다. 기본값은 config.yaml의 llm 섹션."""
+    """프롬프트를 던지고 텍스트 응답을 받는다. 기본값은 config.yaml의 llm 섹션.
+
+    job_id/phase는 순전히 기록용이다 — "지원 하나당 리소스를 얼마나 쓰는가"에
+    답하려고 `llm_calls`에 남긴다(`_log_cost` 참고). 호출 자체 동작에는
+    영향을 주지 않는다.
+    """
     if not cli_available():
         raise ClaudeUnavailable(
             "claude CLI를 찾을 수 없습니다. Claude Code가 설치되어 있고 PATH에 있는지 확인하세요."
@@ -176,7 +183,7 @@ def ask(
         if payload.get("is_error"):
             _raise_if_limited(str(payload.get("result", "")))
             raise RuntimeError(f"claude 오류: {str(payload.get('result'))[:500]}")
-        _log_cost(payload)
+        _log_cost(payload, model=model, job_id=job_id, phase=phase)
         return str(payload.get("result", "")).strip()
     return proc.stdout.strip()
 
@@ -188,6 +195,8 @@ def ask_session(
     model: str | None = None,
     timeout: int | None = None,
     system_prompt: str = WRITER_SYSTEM_PROMPT,
+    job_id: int | None = None,
+    phase: str = "",
 ) -> dict[str, str]:
     """세션을 이어가며 묻는다. 반복 편집(가이드 수정)처럼 이전 지시를 기억해야
     자연스러운 경우에 쓴다 — 그 외에는 매번 완전히 새 대화인 `ask()`를 쓴다.
@@ -252,20 +261,52 @@ def ask_session(
     if payload.get("is_error"):
         _raise_if_limited(str(payload.get("result", "")))
         raise RuntimeError(f"claude 오류: {str(payload.get('result'))[:500]}")
-    _log_cost(payload)
+    _log_cost(payload, model=model, job_id=job_id, phase=phase)
     return {
         "text": str(payload.get("result", "")).strip(),
         "session_id": str(payload.get("session_id") or session_id or ""),
     }
 
 
-def _log_cost(payload: dict) -> None:
-    """호출 비용이 눈에 보여야 모델 선택을 판단할 수 있다."""
+def _log_cost(
+    payload: dict, *, model: str = "", job_id: int | None = None, phase: str = ""
+) -> None:
+    """호출 비용이 눈에 보여야 모델 선택을 판단할 수 있다.
+
+    로그 줄만으로는 "공고 하나에 LLM을 얼마나 썼나"를 나중에 못 묻는다 —
+    write·review·to_editor_json·portfolio_match가 로그 파일 여기저기 흩어져
+    있어 그때그때 눈으로 세는 수밖에 없었다. `llm_calls`에 job_id와 함께
+    남겨두면 `cli.py llm-cost <job_id>`로 바로 합산해 볼 수 있다.
+
+    기록 실패는 호출 자체를 막지 않는다 — 비용 집계가 안 된다고 이력서
+    작성이 멈추면 안 된다.
+    """
     usage = payload.get("usage") or {}
+    tag = f" [{phase or '?'} job={job_id}]" if phase or job_id is not None else ""
     log.info(
-        "claude 응답 — 입력 %s토큰 / 출력 %s토큰 / $%s / %ss",
+        "claude 응답 — 입력 %s토큰 / 출력 %s토큰 / $%s / %ss%s",
         usage.get("input_tokens", "?"),
         usage.get("output_tokens", "?"),
         round(payload.get("total_cost_usd", 0), 4),
         round(payload.get("duration_ms", 0) / 1000, 1),
+        tag,
     )
+    try:
+        from .db import connect, now
+
+        conn = connect()
+        try:
+            conn.execute(
+                """INSERT INTO llm_calls
+                     (job_id, phase, model, input_tokens, output_tokens,
+                      cost_usd, duration_ms, called_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (job_id, phase or "", model,
+                 usage.get("input_tokens"), usage.get("output_tokens"),
+                 payload.get("total_cost_usd"), payload.get("duration_ms"), now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        log.debug("토큰 사용 기록 실패(무시): %s", e)

@@ -77,7 +77,7 @@ def match(job: dict[str, Any], cfg: dict[str, Any]) -> str | None:
         description=(job.get("description") or "")[:3000],
     )
 
-    raw = llm.ask(prompt).strip().strip('"').strip("'")
+    raw = llm.ask(prompt, job_id=job.get("id"), phase="portfolio_match").strip().strip('"').strip("'")
     valid = {it["title"] for it in items}
     if raw in valid:
         return raw
