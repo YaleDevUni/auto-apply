@@ -363,6 +363,9 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "track": "TEXT",
         "headline": "TEXT",
         "skills": "TEXT NOT NULL DEFAULT '[]'",
+        # 공고에 맞춰 에이전트가 고른 포트폴리오 제목(원티드 표기 그대로, NFC).
+        # resume_title과 같은 자리에 둔다 — 지원 단계가 여기서 읽어 레시피에 넘긴다.
+        "portfolio_title": "TEXT",
     },
 }
 

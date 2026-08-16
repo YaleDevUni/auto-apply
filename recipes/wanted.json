@@ -20,7 +20,14 @@
     "실패했다(session.py가 브라우저 창을 화면 밖에 숨겨 띄우는 구조 — hidden 상태에서",
     "렌더링이 간헐적으로 느려진다. 같은 조건에서도 소요시간이 23초~52초로 널뛰었다).",
     "즉 원인은 팝업/레이아웃이 아니라 렌더링 지연 편차가 15초 타임아웃을 가끔 넘는",
-    "것으로 보고, expect timeout_ms를 30000으로 올려둔다."
+    "것으로 보고, expect timeout_ms를 30000으로 올려둔다.",
+    "",
+    "실측(2026-08-16, 공고 362772 유에스소프트): 위 '이력서 하나 고르고 제출이",
+    "전부다'는 포트폴리오를 계정에 올리기 전 관찰이었다. 포트폴리오(업로드한",
+    "PDF)를 올린 뒤 다시 보니 같은 체크리스트 안에 '업로드 완료' 상태로 같이",
+    "나온다 — 별도 섹션이 아니다. 여러 개를 동시에 체크해도 서로 안 밀어낸다.",
+    "다만 업로드형 문서의 파일명만 유니코드 NFD로 렌더링된다(사본메이커",
+    "제목은 NFC) — steps의 포트폴리오 check 스텝 _why 참고."
   ],
   "login_dead_pattern": "id\\.wanted\\.co\\.kr|/login|/signup",
   "session_probe_url": "https://www.wanted.co.kr/cv",
@@ -65,6 +72,13 @@
       "do": "check",
       "sel": "li:has(span:text-is(\"{job.resume}\")) input[type=checkbox][id^=\"resume-\"]",
       "_why": "트랙에 맞는 이력서를 제목으로 정확히 고른다. nth=0(첫 번째)은 쓰면 안 된다 — 목록이 수정일 내림차순이라 순서가 바뀌고, '작성 중'인 미완성 이력서가 위로 올라올 수 있다. text-is는 완전일치라 '...사본'을 잘못 집지 않는다"
+    },
+    {
+      "do": "check",
+      "sel": "li:has(span:text-is(\"{job.portfolio_nfd}\")) input[type=checkbox][id^=\"resume-\"]",
+      "optional": true,
+      "timeout_ms": 8000,
+      "_why": "실측(2026-08-16, 공고 362772 유에스소프트): 포트폴리오(원티드에 업로드해둔 PDF)는 이력서와 같은 첨부파일 목록·같은 체크박스 구조를 쓴다. 여러 개를 동시에 체크해도 서로 밀어내지 않는 걸 실측으로 확인했다(이력서+포트폴리오 둘 다 checked 유지). job.portfolio_nfd를 쓰는 이유는 job.resume과 다르다 — 업로드형 문서의 파일명만 유니코드 NFD로 렌더진다(사본메이커 제목은 NFC). NFC 그대로 넣으면 text-is가 못 찾아 optional이 조용히 건너뛴다. 매칭된 포트폴리오가 없는 공고(job.portfolio_nfd가 빈 문자열)에서도 같은 이유로 조용히 건너뛴다 — 그게 정상 동작이다."
     },
     {
       "do": "expect",

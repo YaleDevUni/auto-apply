@@ -899,6 +899,8 @@ def _job(job_id: int, *, resume_title: str | None = None, require_resume: bool =
     """
     from src.autoapply.config import effective_config
 
+    from src.autoapply import portfolio as portfolio_match
+
     conn = connect()
     try:
         row = conn.execute(
@@ -911,6 +913,10 @@ def _job(job_id: int, *, resume_title: str | None = None, require_resume: bool =
         if row is None:
             raise SystemExit(f"공고 {job_id}가 없다")
         job = dict(row)
+
+        pf_row = conn.execute(
+            "SELECT portfolio_title FROM resume_builds WHERE job_id=?", (job_id,)
+        ).fetchone()
     finally:
         conn.close()
 
@@ -918,6 +924,13 @@ def _job(job_id: int, *, resume_title: str | None = None, require_resume: bool =
     # (이력서를 미리 만들어두고 트랙별로 고르던 예전 방식).
     resumes = effective_config().get("applicability", {}).get("resumes", {})
     job["resume"] = resume_title or (resumes.get(job["platform"], {}) or {}).get(job["track"])
+
+    # 조립 단계(assemble.build_editor_json)가 고른 포트폴리오. portfolio는
+    # 표시·저장용(NFC 그대로), portfolio_nfd는 지원 레시피 셀렉터용이다 —
+    # 원티드가 업로드형 문서 파일명만 유니코드 NFD로 렌더링해서 그대로 쓰면
+    # text-is() 매칭이 조용히 실패한다(portfolio.py 모듈 docstring 참고).
+    job["portfolio"] = pf_row["portfolio_title"] if pf_row else None
+    job["portfolio_nfd"] = portfolio_match.to_selector_text(job["portfolio"])
     if not job["resume"] and require_resume:
         # 여기서 멈추는 게 낫다. 이력서를 못 정한 채 진행하면 레시피가
         # 자리표시자를 못 채우거나, 더 나쁘게는 엉뚱한 이력서를 고른다.

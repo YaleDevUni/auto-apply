@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import llm
+from . import portfolio as portfolio_match
 from .config import effective_config
 from .db import connect, now
 from .paths import RESUME_OUT_DIR, RESUME_SRC_DIR, REVISION_LOG
@@ -621,7 +622,17 @@ def build_editor_json(
 
     gaps = data.get("gaps") or []
     required = [g for g in gaps if g.get("level") == "필수"]
-    max_gaps = effective_config().get("applicability", {}).get("max_required_gaps", 2)
+    cfg = effective_config()
+    max_gaps = cfg.get("applicability", {}).get("max_required_gaps", 2)
+
+    # 이력서와 별개로, 공고에 맞는 포트폴리오를 고른다. 실패해도(LLM 오류 등)
+    # 조립 자체를 막을 이유는 없다 — 포트폴리오는 있으면 붙이는 부가물이지
+    # required_gaps처럼 지원 여부를 가르는 조건이 아니다.
+    try:
+        portfolio_title = portfolio_match.match(job, cfg)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("포트폴리오 매칭 실패(무시): %s", exc)
+        portfolio_title = None
 
     path = None
     if save:
@@ -633,6 +644,7 @@ def build_editor_json(
     _save_build(
         job_id, len(required) <= max_gaps, required, gaps, conn,
         track=job.get("track"), headline=data.get("headline"),
+        portfolio_title=portfolio_title,
     )
 
     return {
@@ -643,6 +655,7 @@ def build_editor_json(
         "required_gaps": len(required),
         "gaps": gaps,
         "path": str(path) if path else None,
+        "portfolio_title": portfolio_title,
         "data": data,
     }
 
@@ -782,6 +795,7 @@ def _save_build(
     *,
     track: str | None = None,
     headline: str | None = None,
+    portfolio_title: str | None = None,
 ) -> None:
     """조립 결과를 남긴다.
 
@@ -792,20 +806,24 @@ def _save_build(
     2번이 중요하다. 예전에는 편집기 화면에서 제목을 읽어 넘겼는데, 그 제목이
     있는 자리의 문구가 상태에 따라 바뀌어("기본 이력서 설정" → "기본 이력서")
     조립과 지원을 잇는 고리가 통째로 끊겼다. 기록해두면 화면에 의존하지 않는다.
+
+    portfolio_title도 같은 이유로 여기 둔다 — 지원 단계가 이력서 제목과
+    같은 자리에서 읽어 레시피에 넘긴다.
     """
     own = conn is None
     conn = conn or connect()
     try:
         conn.execute(
             """INSERT INTO resume_builds
-                 (job_id, ok, required_gaps, gaps, track, headline, built_at)
-               VALUES (?,?,?,?,?,?,?)
+                 (job_id, ok, required_gaps, gaps, track, headline, portfolio_title, built_at)
+               VALUES (?,?,?,?,?,?,?,?)
                ON CONFLICT(job_id) DO UPDATE SET
                  ok=excluded.ok, required_gaps=excluded.required_gaps,
                  gaps=excluded.gaps, track=excluded.track,
-                 headline=excluded.headline, built_at=excluded.built_at""",
+                 headline=excluded.headline, portfolio_title=excluded.portfolio_title,
+                 built_at=excluded.built_at""",
             (job_id, 1 if ok else 0, len(required),
-             json.dumps(gaps, ensure_ascii=False), track, headline, now()),
+             json.dumps(gaps, ensure_ascii=False), track, headline, portfolio_title, now()),
         )
         conn.commit()
     finally:
@@ -823,7 +841,8 @@ def _load_cached(
     conn = conn or connect()
     try:
         row = conn.execute(
-            "SELECT ok, required_gaps, gaps, built_at FROM resume_builds WHERE job_id=?",
+            "SELECT ok, required_gaps, gaps, portfolio_title, built_at "
+            "FROM resume_builds WHERE job_id=?",
             (job_id,),
         ).fetchone()
         if row is None:
@@ -851,6 +870,7 @@ def _load_cached(
             "required_gaps": row["required_gaps"],
             "gaps": json.loads(row["gaps"] or "[]"),
             "path": str(path),
+            "portfolio_title": row["portfolio_title"],
             "cached": True,
             "data": json.loads(path.read_text(encoding="utf-8")),
         }
@@ -977,7 +997,8 @@ def registration(job_id: int, conn: sqlite3.Connection | None = None) -> dict[st
     conn = conn or connect()
     try:
         row = conn.execute(
-            "SELECT resume_title, resume_url, headline FROM resume_builds WHERE job_id=?",
+            "SELECT resume_title, resume_url, headline, portfolio_title "
+            "FROM resume_builds WHERE job_id=?",
             (job_id,),
         ).fetchone()
         return dict(row) if row else {}
