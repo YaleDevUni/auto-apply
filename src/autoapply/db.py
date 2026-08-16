@@ -492,6 +492,20 @@ def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def next_seq(conn: sqlite3.Connection, key: str) -> int:
+    """단조 증가 카운터. 이력서 제목처럼 겹치면 안 되는 이름에 쓴다.
+
+    목록을 읽어 빈 번호를 찾는 방법도 있지만, 그건 화면 파싱이 맞다는 데
+    기댄다 — 실제로 메모 안내문을 이력서 제목으로 읽은 적이 있다. 카운터는
+    화면과 무관하게 유일하고, 지운 번호를 재사용하지 않아 기록과도 어긋나지
+    않는다. 트랜잭션 안에서 읽고 쓰므로 동시에 돌아도 같은 번호가 안 나온다.
+    """
+    with conn:
+        cur = int(get_setting(conn, key, "0") or 0) + 1
+        set_setting(conn, key, str(cur))
+    return cur
+
+
 def get_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default

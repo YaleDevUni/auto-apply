@@ -160,6 +160,17 @@ def _date_buttons(page):
     )
 
 
+def _date_is_empty(page, nth: int) -> bool:
+    """그 날짜 칸이 아직 비었는가. 비면 'YYYY.MM'이라는 자리표시자가 보인다."""
+    btns = _date_buttons(page)
+    if nth >= btns.count():
+        return False
+    try:
+        return "YYYY" in (btns.nth(nth).inner_text() or "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _set_date(page, nth: int, value: str) -> bool:
     """YYYY.MM 버튼을 눌러 연도·월을 고른다. value는 "2023.08" 형식.
 
@@ -993,6 +1004,20 @@ def fill(
 
         # 날짜 — 버튼+피커라 입력 필드와 처리가 다르다. 뒤에 몰아서 한다
         # (피커가 열려 있으면 다른 필드 클릭이 가려진다).
+        # 재직기간은 사본이 들고 온 그대로 둔다 — 회사에 다닌 기간은 공고에
+        # 따라 달라지지 않는다. 날짜 피커는 실패 확률이 높은 조작이라, 바뀔 일
+        # 없는 값을 다시 넣는 건 위험만 늘린다.
+        #
+        # 성과 기간은 다르다. 성과는 공고마다 골라 다시 쓰는 항목이라 날짜도
+        # 그때그때 달라진다. 여기는 매번 설정한다.
+        keep_dates = origin["source"] == "copy"
+
+        def put_tenure(slot: int, value: str) -> bool:
+            """재직기간 전용. 이미 값이 있으면 손대지 않는다."""
+            if keep_dates and not _date_is_empty(p, slot):
+                return True
+            return _set_date(p, slot, value)
+
         dates: dict[str, bool] = {}
         if "dates" in steps:
             achs = [a for a in ((exps[0].get("achievements") if exps else []) or [])
@@ -1001,9 +1026,9 @@ def fill(
             if exps:
                 e0 = exps[0]
                 if e0.get("start"):
-                    dates["exp_start"] = _set_date(p, slots["exp_start"], e0["start"])
+                    dates["exp_start"] = put_tenure(slots["exp_start"], e0["start"])
                 if e0.get("end"):
-                    dates["exp_end"] = _set_date(p, slots["exp_end"], e0["end"])
+                    dates["exp_end"] = put_tenure(slots["exp_end"], e0["end"])
                 for i, a in enumerate(achs):
                     if a.get("start"):
                         dates[f"ach{i}_start"] = _set_date(p, slots[f"ach{i}_start"], a["start"])
@@ -1093,6 +1118,35 @@ def pick_template(job: dict[str, Any]) -> str:
     return by_track.get(job.get("track") or "") or cfg.get("default") or ""
 
 
+TITLE_MAX = 50  # 원티드 제목 입력칸의 maxlength
+
+
+def unique_title(base: str) -> str:
+    """겹치지 않는 이력서 제목. 뒤에 카운터를 붙인다.
+
+    같은 이름을 허용하면 지원 폼에서 이력서를 고를 수 없다 — 셀렉터가
+    `li:has(span:text-is("{제목}"))`이라 둘 중 무엇을 집는지 알 수 없고,
+    그러면 무엇을 제출했는지도 모른다.
+
+    번호는 목록을 세어 정하지 않고 DB 카운터에서 받는다. 화면 파싱이 맞다는
+    데 기대지 않으려는 것이다 — 실제로 메모 안내문을 제목으로 읽은 적이 있다.
+    지운 번호도 재사용하지 않으므로 기록과 어긋나지 않는다.
+
+    번호 자리는 50자 제한 안에서 확보한다. 잘라내는 쪽은 본문이다 — 번호를
+    잘라내면 애초에 붙이는 의미가 없다.
+    """
+    from ..db import connect, next_seq
+
+    conn = connect()
+    try:
+        seq = next_seq(conn, "resume_seq")
+    finally:
+        conn.close()
+
+    suffix = f" #{seq}"
+    return base[: TITLE_MAX - len(suffix)].rstrip() + suffix
+
+
 def prepare_from_template(
     page, *, template: str, new_title: str
 ) -> dict[str, Any]:
@@ -1101,12 +1155,14 @@ def prepare_from_template(
     반환한 url이 그 이력서의 유일한 손잡이다. 제목은 사람이 읽으라고 붙이는
     것이고, 같은 이름이 두 개 생겨도 url은 겹치지 않는다.
     """
+    wanted = unique_title(new_title)
+
     copy_title = duplicate_resume(page, template)
     if not copy_title:
         return {"ok": False, "reason": f"사본 실패: {template}"}
 
-    renamed = rename_resume(page, copy_title, new_title)
-    title = new_title if renamed else copy_title
+    renamed = rename_resume(page, copy_title, wanted)
+    title = wanted if renamed else copy_title
 
     row = page.locator(f'{ROW}:has(span:text-is("{title}"))').first
     if not row.count():

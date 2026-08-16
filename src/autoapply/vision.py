@@ -67,14 +67,21 @@ def available() -> bool:
     return llm.cli_available()
 
 
-def ask(shot: str | Path, question: str) -> str:
-    """스크린샷에 대해 자유롭게 묻는다. 레시피 수복처럼 '무엇이 보이나'가 필요할 때."""
+def ask(shot: str | Path, question: str, *, ignore: str = "") -> str:
+    """스크린샷에 대해 자유롭게 묻는다. 레시피 수복처럼 '무엇이 보이나'가 필요할 때.
+
+    ignore를 안 주면 `verify()`가 막아둔 오탐이 그대로 돌아온다. 실제로 겪었다:
+    편집기에 회색으로 깔린 빈 템플릿 행(시험명* 같은)을 '필수 미입력'이라고
+    보고해서, 멀쩡한 이력서를 미완성으로 판단할 뻔했다. 화면을 자유롭게 묻는
+    질문일수록 **무엇을 무시할지**를 같이 줘야 한다.
+    """
     path = Path(shot)
     if not path.exists():
         raise FileNotFoundError(f"스크린샷이 없다: {path}")
     cfg = effective_config().get("llm", {})
+    tail = f"\n\n지적하지 말 것:\n{ignore}" if ignore else ""
     return llm.ask(
-        _HEAD.format(shot=path) + question,
+        _HEAD.format(shot=path) + question + tail,
         image_paths=[path],
         model=cfg.get("vision_model", cfg.get("model", "claude-sonnet-5")),
     ).strip()
