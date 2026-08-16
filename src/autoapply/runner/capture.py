@@ -59,7 +59,8 @@ _JS = """() => {
 def capture(
     job: dict[str, Any], *, headless: bool = False, click: list[str] | None = None
 ) -> dict[str, Any]:
-    with browser(headless=headless) as s:
+    with browser(headless=headless, kind="화면 수집",
+                 label=f"공고 {job.get('job_id', '')}") as s:
         return _capture_with(s, job, click or [])
 
 

@@ -95,7 +95,8 @@ def run(
     recipe = load_recipe(job["platform"])  # 브라우저를 띄우기 전에 확인한다
     if session is not None:
         return _run_with(session, job, live, recipe)
-    with browser(headless=headless) as s:
+    with browser(headless=headless, kind="제출" if live else "지원 폼 확인",
+                 label=f"공고 {job.get('job_id', '')}") as s:
         return _run_with(s, job, live, recipe)
 
 

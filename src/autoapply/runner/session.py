@@ -571,10 +571,25 @@ class PlaywrightSession:
 
 
 @contextmanager
-def browser(*, headless: bool = False, hidden: bool | None = None) -> Iterator[PlaywrightSession]:
-    s = PlaywrightSession(headless=headless, hidden=hidden)
-    s.start()
-    try:
-        yield s
-    finally:
-        s.close()
+def browser(
+    *,
+    headless: bool = False,
+    hidden: bool | None = None,
+    kind: str = "브라우저 작업",
+    label: str = "",
+) -> Iterator[PlaywrightSession]:
+    """브라우저를 쓰는 유일한 입구. **잠금을 잡고** 시작한다.
+
+    상주 창은 공유 자원이다 — 잠그지 않으면 나중에 시작한 작업이 같은 탭을
+    다른 URL로 몰고 가고, 먼저 돌던 작업은 셀렉터를 기다리다 타임아웃으로
+    죽는다(runner/lock.py 참고). 못 잡으면 `BrowserBusy`가 올라온다.
+    """
+    from .lock import browser_lock
+
+    with browser_lock(kind, label=label):
+        s = PlaywrightSession(headless=headless, hidden=hidden)
+        s.start()
+        try:
+            yield s
+        finally:
+            s.close()

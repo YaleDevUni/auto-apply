@@ -1038,7 +1038,8 @@ def fill(
     dry_run=True(기본)면 입력하지 않고 필드 존재만 확인한다. 편집기는 자동
     저장이라 입력 자체가 되돌리기 어렵다 — 셀렉터가 맞는지 먼저 확인한다.
     """
-    with browser(headless=headless) as s:
+    with browser(headless=headless, kind="이력서 작성",
+                 label=f"공고 {job_id}") as s:
         url, origin = open_editor(
             s, resume_url=resume_url, template=template, new_title=new_title,
         )
@@ -1437,7 +1438,7 @@ def list_resumes(*, headless: bool = False) -> list[dict[str, str]]:
     파싱은 파이썬에서 한다. JS 안에서 개행으로 쪼개려면 이스케이프가 파이썬
     문자열과 JS 문자열을 두 번 거쳐야 해서 조용히 깨진다.
     """
-    with browser(headless=headless) as s:
+    with browser(headless=headless, kind="이력서 목록 조회") as s:
         s.goto(CV_URL)
         page = s.page()
         page.wait_for_timeout(5500)
@@ -1572,7 +1573,7 @@ def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
     local = {p.stem.split("-", 1)[-1] for p in RESUME_OUT_DIR.glob("*.json")}
     ours = _our_titles()
 
-    with browser(headless=headless) as s:
+    with browser(headless=headless, kind="이력서 정리") as s:
         s.goto(_sel("url", CV_URL))
         page = s.page()
         page.wait_for_timeout(5500)
@@ -1620,7 +1621,7 @@ def delete_after_submit(title: str, *, headless: bool = False) -> bool:
     지운다. 호출부(`cli.py`)가 로컬 사본이 있는지 먼저 확인하고 부른다;
     여기서는 판단하지 않는다(`delete_resume`와 같은 원칙).
     """
-    with browser(headless=headless) as s:
+    with browser(headless=headless, kind="제출 이력서 삭제", label=title) as s:
         s.goto(_sel("url", CV_URL))
         page = s.page()
         page.wait_for_timeout(5500)

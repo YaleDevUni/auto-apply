@@ -870,6 +870,7 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     """
     from src.autoapply import assemble
     from src.autoapply.runner import resume_editor
+    from src.autoapply.runner.lock import browser_lock
 
     built = assemble.build_editor_json(job_id)
     if not built["ok"]:
@@ -886,25 +887,30 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     new_title = _resume_title(job_row)
     logging.getLogger(__name__).info("사본 선택: %s → %r", template, new_title)
 
-    filled = resume_editor.fill(
-        built["data"], resume_url=resume_url,
-        template=None if resume_url else template,
-        new_title=new_title, job_id=job_id, dry_run=False,
-    )
+    # 등록과 지원을 **한 덩어리로** 잡는다. 둘 사이를 남에게 내주면 이력서를
+    # 만들어둔 채 다른 작업이 탭을 가져가고, 돌아왔을 땐 지원 폼이 아닌 화면에서
+    # 셀렉터를 찾다 타임아웃으로 죽는다. 아래 fill/apply의 browser()는 같은
+    # 프로세스라 재진입으로 그냥 통과한다.
+    with browser_lock("지원준비", label=f"공고 {job_id}"):
+        filled = resume_editor.fill(
+            built["data"], resume_url=resume_url,
+            template=None if resume_url else template,
+            new_title=new_title, job_id=job_id, dry_run=False,
+        )
 
-    # 등록 결과를 기록해두고, 지원 단계는 DB에서 읽는다. 화면에서 제목을 읽는
-    # 것은 한 번뿐이고, 그 뒤로는 편집기 상태가 바뀌어도 흔들리지 않는다.
-    title = filled.get("title") or assemble.registered_title(job_id)
-    if not title:
-        return {"stopped": "이력서 제목을 읽지 못함 — 어느 이력서를 낼지 정할 수 없다"}
-    assemble.record_registration(
-        job_id, resume_title=title,
-        resume_url=filled.get("url", ""), skills=filled.get("skills") or [],
-        report=resume_editor.fill_report(filled),
-    )
+        # 등록 결과를 기록해두고, 지원 단계는 DB에서 읽는다. 화면에서 제목을 읽는
+        # 것은 한 번뿐이고, 그 뒤로는 편집기 상태가 바뀌어도 흔들리지 않는다.
+        title = filled.get("title") or assemble.registered_title(job_id)
+        if not title:
+            return {"stopped": "이력서 제목을 읽지 못함 — 어느 이력서를 낼지 정할 수 없다"}
+        assemble.record_registration(
+            job_id, resume_title=title,
+            resume_url=filled.get("url", ""), skills=filled.get("skills") or [],
+            report=resume_editor.fill_report(filled),
+        )
 
-    job = _job(job_id, resume_title=title, require_resume=True)
-    result = _apply_with(job, live=live)
+        job = _job(job_id, resume_title=title, require_resume=True)
+        result = _apply_with(job, live=live)
     return {
         "company": built["company"],
         # shot은 원티드 편집기 화면을 새로고침(=저장 확인) 후 찍은 실물 사진이다
@@ -1063,6 +1069,23 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except SystemExit:
         raise
+    except Exception as e:  # 브라우저 경합은 고장이 아니다 — 안내하고 조용히 끝낸다
+        from src.autoapply.runner.lock import BrowserBusy
+
+        if not isinstance(e, BrowserBusy):
+            raise
+        cmd = " ".join(sys.argv[1:])[:150]
+        try:
+            _tell(
+                f"🔒 <b>브라우저가 사용 중</b> — <code>{html.escape(cmd)}</code>는 시작하지 못했습니다.\n"
+                f"지금 도는 작업: <i>{html.escape(str(e))}</i>\n\n"
+                "끝나면 다시 눌러주세요. 지금 멈추려면 <code>/stop</code>."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        print(json.dumps({"skipped": "브라우저 사용 중", "holder": str(e)},
+                         ensure_ascii=False, indent=2))
+        raise SystemExit(0) from None
     except BaseException as e:  # noqa: BLE001
         cmd = " ".join(sys.argv[1:])[:150]
         try:

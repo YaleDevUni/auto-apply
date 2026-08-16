@@ -53,7 +53,7 @@ def check_session(platform: str, *, headless: bool = False) -> bool | None:
         return None
 
     try:
-        with browser(headless=headless) as s:
+        with browser(headless=headless, kind="세션 점검", label=platform) as s:
             s.goto(url)
             s.page().wait_for_timeout(3000)
 
