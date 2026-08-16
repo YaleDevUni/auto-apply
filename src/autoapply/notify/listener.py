@@ -652,6 +652,22 @@ def _handle(conn: sqlite3.Connection, text: str) -> str:
     )
 
 
+def _source_stamp() -> float:
+    """소스 파일들의 최신 수정시각. 상주 리스너가 옛 코드를 물고 있는지 재는 자.
+
+    파이썬은 모듈을 다시 읽지 않는다 — cli.py를 고쳐 커밋해도 이미 뜬 리스너
+    프로세스는 기동 시점 코드로 계속 돈다(실측: 승인 버튼 콜백 분기가 없는
+    구판이 떠 있어 승인이 "모르는 버튼입니다"로 떨어졌다). data/·profile/처럼
+    **실행 중에 바뀌는 경로는 절대 포함하지 않는다** — 포함하면 자기가 쓴
+    파일 때문에 데몬이 계속 재시작한다.
+    """
+    from ..paths import CODE_ROOT
+
+    paths = [CODE_ROOT / "cli.py", *(CODE_ROOT / "src" / "autoapply").glob("**/*.py")]
+    stamps = [p.stat().st_mtime for p in paths if p.exists()]
+    return max(stamps) if stamps else 0.0
+
+
 def watch(conn: sqlite3.Connection, *, wait: int = 25) -> None:
     """상시 대기하며 즉시 응답한다. 별도 launchd 에이전트가 이걸 돌린다.
 
@@ -661,10 +677,20 @@ def watch(conn: sqlite3.Connection, *, wait: int = 25) -> None:
     끊겨도 죽지 않는다. 네트워크가 잠깐 나가거나 맥이 잠들었다 깨어나는 일이
     잦으므로, 예외는 삼키고 잠시 뒤 다시 붙는다. KeepAlive가 프로세스를
     살려주지만 그때마다 재시작하면 로그가 지저분해진다.
+
+    소스가 바뀌면 다르다 — 그건 코드가 낡았다는 신호라 스스로 물러난다.
+    `com.autoapply.listen.plist`의 KeepAlive가 곧바로 새 프로세스를 띄우고,
+    그게 새 코드를 문다. 여기서 `return`이 안전한 이유:
+    (a) 수신 offset은 drain()이 매 업데이트마다 저장하므로 못 받은 메시지는
+        다음 프로세스가 이어받는다.
+    (b) 버튼이 띄운 서브프로세스(`fix-run` 등)는 `start_new_session=True`라
+        부모가 나가도 산다.
+    (c) 그 사이 눌린 버튼은 텔레그램이 다음 getUpdates에 다시 밀어준다.
     """
     import time
 
     log.info("텔레그램 대기 시작 (롱폴링 %d초)", wait)
+    stamp = _source_stamp()
     while True:
         try:
             drain(conn, wait=wait)
@@ -673,6 +699,12 @@ def watch(conn: sqlite3.Connection, *, wait: int = 25) -> None:
         except Exception as e:  # noqa: BLE001
             log.warning("수신 중 오류 — 10초 뒤 재시도: %s", e)
             time.sleep(10)
+            continue
+
+        fresh = _source_stamp()
+        if fresh > stamp:
+            log.info("소스가 바뀌었다 — 새 코드로 다시 뜬다 (launchd KeepAlive)")
+            return
 
 
 def drain(conn: sqlite3.Connection, *, reply: bool = True, wait: int = 0) -> dict[str, Any]:
@@ -874,7 +906,11 @@ def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
         return
 
     if not data.startswith(("submit:", "apply:")):
-        telegram.answer_callback(conn, cb_id, "모르는 버튼입니다")
+        # 정상 분기라면 여기 안 온다 — 리스너가 이 버튼을 모르는 구판일 수
+        # 있다는 뜻이라 로그 없이 넘기면 sendMessage가 안 나가는 채로 묻힌다
+        # (실측: 승인 버튼이 이 자리로 떨어졌는데 로그가 한 줄도 없었다).
+        log.warning("모르는 콜백 data=%r — 리스너가 옛 코드일 수 있다", data)
+        telegram.answer_callback(conn, cb_id, "모르는 버튼입니다 (리스너 재시작 필요할 수 있음)")
         return
 
     # submit — 준비 때 만들어둔 이력서로 제출만 한다(권장).
