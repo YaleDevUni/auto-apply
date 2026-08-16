@@ -471,7 +471,10 @@ def build(
 # ─────────────────── 원티드 편집기용 구조화 출력 ───────────────────
 #
 # 원티드 이력서 편집기는 필드가 나뉜 폼이다(이름/연락처/간단소개/경력/학력/
-# AI 활용/스킬/링크). 마크다운 한 덩어리로는 채울 수 없다.
+# 스킬/링크). 마크다운 한 덩어리로는 채울 수 없다.
+#
+# 'AI 활용 경험' 칸은 스키마에 없다. 사람이 사본메이커에 직접 등록해 둔 값이고
+# 사본이 그대로 들고 온다 — 생성하면 매번 다른 문장이 50자 칸에 덮어써진다.
 #
 # 마크다운을 파싱해 쪼개지 않고 처음부터 JSON으로 받는 이유: 파싱은 문장 형태가
 # 조금만 바뀌어도 깨지는데, 그 깨짐이 조용하다. 잘못 쪼개진 채로 폼에 들어가면
@@ -494,7 +497,6 @@ EDITOR_SCHEMA = """{
     {"school": "학교명", "major": "전공 및 학위", "start": "YYYY.MM", "end": "YYYY.MM",
      "detail": "이수 과목 또는 연구 내용"}
   ],
-  "ai_usage": "AI 활용 경험 **한 줄 요약. 50자 이내(엄수).** 원티드 필드가 50자 제한이라 넘기면 잘린다. 상세 내용은 summary 불릿이나 주요 성과에 녹인다",
   "languages": [{"name": "영어", "level": "고급 비즈니스 레벨"}],
   "_note_language": "level은 원티드 선택지 문구를 그대로 써야 한다: 유창함 | 고급 비즈니스 레벨 | 비즈니스 레벨 | 일상 회화. 다른 표현을 쓰면 선택지를 못 찾아 비워둔 채 지나간다. 가이드에 '영어 유창'만 있으면 '고급 비즈니스 레벨'로 적는다.",
   "skills": ["스킬", "나열"],
@@ -586,7 +588,10 @@ def build_editor_json(
     prompt = f"""아래 [작성 가이드]를 따라 [채용공고]에 맞춘 이력서를 **JSON으로만** 출력하라.
 
 가이드의 §1 처리 순서, §3 사실 저장소, §4 문장 규칙, §5 일관성 체크리스트,
-§6-1 AI 활용, §7 직무별 강조 우선순위를 적용한다.
+§7 직무별 강조 우선순위를 적용한다.
+
+가이드 §6-1 'AI 활용'은 **출력하지 않는다.** 그 칸은 사람이 직접 등록해 둔
+자리다. §6-1의 근거 표는 다른 필드(간단 소개·주요 성과)에 녹이는 용도로만 쓴다.
 
 **한 분야로 초점을 맞춘다.** 공고가 요구하는 핵심 역량 하나를 정하고 거기에 맞춰
 구성한다. 백엔드·DevOps·인프라·AI를 한 이력서에 고루 담으면 어느 것도 강해 보이지
@@ -622,7 +627,7 @@ def build_editor_json(
     raw = llm.ask(prompt, job_id=job_id, phase="to_editor_json")
     data = _parse_json(raw)
     _strip_reasoning(data)
-    _clamp_fields(data)
+    _drop_manual_fields(data)
     _ensure_summary_length(data, job, guide)
     _strip_reasoning(data)  # 보강 응답에도 섞일 수 있다
 
@@ -675,8 +680,9 @@ REASONING = re.compile(
     r"|(우선순위|사실 저장소)[^\n]*(따라|기준으로)[^\n]*[.。]"
 )
 
-# 원티드 편집기 필드 길이 제한. 넘기면 브라우저가 조용히 자른다.
-FIELD_LIMITS = {"ai_usage": 50}
+# 사람이 사본메이커에 직접 등록한 필드. 조립 결과에 있으면 안 된다 —
+# 남아 있으면 편집기 채우기가 그 값을 덮어쓸 통로가 생긴다.
+MANUAL_FIELDS = ("ai_usage",)
 
 SUMMARY_MIN = 450
 
@@ -690,7 +696,7 @@ def _strip_reasoning(data: dict[str, Any]) -> None:
     문단 단위로 검사한다. 근거 문장은 보통 첫 문단에 통째로 오고, 본문 불릿에는
     섞이지 않는다.
     """
-    for key in ("summary", "ai_usage"):
+    for key in ("summary",):
         text = data.get(key)
         if not isinstance(text, str) or not text.strip():
             continue
@@ -701,35 +707,17 @@ def _strip_reasoning(data: dict[str, Any]) -> None:
         data[key] = "\n\n".join(kept).strip()
 
 
-def _clamp_fields(data: dict[str, Any]) -> None:
-    """길이 제한이 있는 필드를 다듬는다.
+def _drop_manual_fields(data: dict[str, Any]) -> None:
+    """사람이 직접 등록한 필드를 조립 결과에서 지운다.
 
-    'AI 활용 경험'은 50자짜리 **한 줄 요약 칸**이다. 머리말("AI 활용")과 불릿
-    기호는 그 50자를 갉아먹으므로 먼저 걷어낸다. 그래도 넘치면 단어 중간이 아니라
-    구두점·공백에서 자른다 — 편집기가 자르면 "…채용 자동화 파이"처럼 끊긴다.
+    스키마에서 뺐어도 모델은 가이드 §6-1을 읽고 `ai_usage`를 되살려 넣는다.
+    프롬프트에 의존하지 않고 코드로 막는다 — 값이 남아 있으면 편집기가 채울
+    통로가 열리고, 그 칸(50자)은 사람이 문장을 확정해 둔 자리다.
     """
-    for key, limit in FIELD_LIMITS.items():
-        text = data.get(key)
-        if not isinstance(text, str) or not text.strip():
-            continue
-
-        # 머리말 줄과 불릿 기호 제거 → 한 줄로
-        lines = [ln.strip().lstrip("·-• ").strip() for ln in text.splitlines() if ln.strip()]
-        lines = [ln for ln in lines if ln not in ("AI 활용", "AI 활용 경험")]
-        one = " ".join(lines).strip()
-
-        if len(one) > limit:
-            cut = one[:limit]
-            # 마지막 구두점이나 공백까지만 남긴다
-            for sep in (". ", ", ", " "):
-                idx = cut.rfind(sep)
-                if idx > limit * 0.5:
-                    cut = cut[:idx]
-                    break
-            one = cut.rstrip(" ,.·")
-            log.info("%s가 %d자 — %d자로 줄였다", key, len(text), len(one))
-
-        data[key] = one
+    for key in MANUAL_FIELDS:
+        if key in data:
+            log.info("%s는 사람이 등록하는 필드 — 조립 결과에서 제거", key)
+            data.pop(key, None)
 
 
 def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str) -> None:
@@ -906,7 +894,6 @@ def verify_screenshot(shot: str, data: dict[str, Any]) -> dict[str, Any]:
             f"회사: {exps[0].get('company')}" if exps else "",
             f"주요 성과: {ach.get('title')}" if ach.get("title") else "",
             "학력: " + ", ".join(e.get("school", "") for e in (data.get("educations") or [])),
-            f"AI 활용: {data.get('ai_usage', '')[:50]}",
             "스킬: " + ", ".join((data.get("skills") or [])[:8]),
             "링크: " + ", ".join((l or {}).get("name", "") for l in (data.get("links") or [])),
             "언어: " + ", ".join(

@@ -6,6 +6,9 @@
 (**AI 활용 경험**)가 있다. 그리고 실측상 파일 업로드는 동의 모달 뒤에서도
 파일 선택기가 열리지 않았다 — 합성 클릭으로는 안 되는 핸들러로 보인다.
 
+단, 그 **AI 활용 경험 칸은 사람이 사본메이커에 직접 등록해 둔 값**이다.
+사본이 그대로 들고 오므로 자동화는 읽지도 쓰지도 않는다(`MANUAL` 참조).
+
 ## 채우는 순서와 안전장치
 
 편집기는 저장 버튼을 따로 누르지 않고 자동 저장되는 구조다. 그래서 **채우는 것
@@ -830,6 +833,11 @@ FIELDS: dict[str, str] = {
 # 계정에서 자동으로 채워지는 값. 덮어쓰지 않는다 — 원티드가 갖고 있는 게 정본이다.
 PREFILLED = ("name", "mobile", "email")
 
+# 사람이 사본메이커에 직접 써 넣은 값. 사본이 그대로 들고 오므로 우리가 다시
+# 쓸 이유가 없고, 써서도 안 된다 — 50자 칸이라 LLM이 쓸 때마다 문장이 바뀌고
+# 잘렸다. 셀렉터는 남겨둔다(존재 확인·자가수복용). 쓰지 않을 뿐이다.
+MANUAL = ("ai_usage",)
+
 
 def _fields(platform: str = "wanted") -> dict[str, str]:
     """레시피에 정의된 필드맵. 없는 항목은 기본값으로 채운다."""
@@ -1076,8 +1084,9 @@ def fill(
         # 저장이 안 되거나 타임아웃으로 실패하던 자리다 — 지나간다.
         steps = only or (COPY_STEPS if origin["source"] == "copy" else ALL_STEPS)
 
-        # 단일 필드부터. 계정이 채워주는 값은 건드리지 않는다.
-        for key in ("summary", "ai_usage") if "text" in steps else ():
+        # 단일 필드부터. 계정이 채워주는 값(PREFILLED)과 사람이 사본메이커에
+        # 직접 넣은 값(MANUAL, 'AI 활용 경험')은 건드리지 않는다.
+        for key in ("summary",) if "text" in steps else ():
             value = data.get(key)
             if value and found.get(key):
                 _set(p, _fields()[key], str(value))
@@ -1716,7 +1725,7 @@ def fill_report(result: dict[str, Any]) -> dict[str, Any]:
     dates = result.get("dates") or {}
     return {
         "sections": {
-            "text": [k for k in result.get("filled", {}) if k in ("summary", "ai_usage")],
+            "text": [k for k in result.get("filled", {}) if k == "summary"],
             "experience": [k for k in result.get("filled", {}) if k.startswith("exp")],
             "education": [k for k in result.get("filled", {}) if k.startswith("edu")],
             "achievements": result.get("filled", {}).get("achievements"),
