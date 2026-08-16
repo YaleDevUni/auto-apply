@@ -153,6 +153,38 @@ def restart_resident() -> bool:
     return _spawn_resident()
 
 
+def _cleanup_stale_service_workers() -> int:
+    """방문마다 하나씩 쌓이고 안 없어지는 service_worker CDP 타깃을 정리한다.
+
+    실측(2026-08-16): 원티드 공고를 열 때마다 braze-service-worker.js가 새
+    CDP 타깃으로 하나씩 남는다(71개 확인 후 공고 하나 더 열었더니 72개).
+    원래는 ~30초 유휴 후 브라우저가 스스로 종료해야 하는데, CDP가 계속
+    붙어 있는 상주 창에서는 그 유휴 종료가 안 도는 것으로 보인다. 스크린샷
+    타임아웃의 원인은 아니었다(따로 확인해 배제함) — 별개의 리소스 누수다.
+
+    닫아도 안전하다: 서비스워커는 그 오리진 페이지가 필요할 때 브라우저가
+    알아서 다시 등록한다. 오프라인 캐시·구독 같은 데이터는 서비스워커
+    "등록"이 아니라 스토리지에 있으므로 스레드를 접는다고 지워지지 않는다.
+    """
+    import httpx
+
+    try:
+        targets = httpx.get(f"{CDP_URL}/json/list", timeout=5).json()
+    except Exception:  # noqa: BLE001
+        return 0
+
+    closed = 0
+    for t in targets:
+        if t.get("type") != "service_worker":
+            continue
+        try:
+            httpx.get(f"{CDP_URL}/json/close/{t['id']}", timeout=3)
+            closed += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return closed
+
+
 def _hidden_default() -> bool:
     """설정에서 읽는다. 기본은 숨김 — 사람 화면을 뺏지 않는 쪽이 기본이어야 한다."""
     try:
@@ -266,6 +298,16 @@ class PlaywrightSession:
             self._page.set_default_timeout(15000)
             self._attached = browser_
             log.info("떠 있는 브라우저에 연결 (창을 새로 띄우지 않음)")
+
+            # 상주 창은 계속 재사용되므로 방문마다 쌓이는 서비스워커를 여기서
+            # 정리한다. 실패해도 연결 자체는 이미 끝났으니 attach를 막지 않는다.
+            try:
+                closed = _cleanup_stale_service_workers()
+                if closed:
+                    log.info("쌓인 서비스워커 %d개 정리", closed)
+            except Exception as e:  # noqa: BLE001
+                log.debug("서비스워커 정리 중 무시된 오류: %s", e)
+
             return True
         except Exception as e:  # noqa: BLE001
             log.info("연결 실패 — 새로 띄운다: %s", e)
