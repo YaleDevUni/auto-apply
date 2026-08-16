@@ -348,6 +348,13 @@ WHERE j.closed_at IS NULL
       SELECT canonical_key FROM apply_ledger
       WHERE status IN ('claimed', 'submitted', 'external')
   )
+  -- 공고 행 자체로도 막는다. canonical_key는 회사명+제목의 해시라 **제목이
+  -- 바뀌면 키도 바뀐다** — 원장의 키는 적을 때 값으로 굳어 있으므로, 회사가
+  -- 제목을 고치면 이미 지원한 자리가 '처음 보는 자리'로 돌아온다.
+  AND j.id NOT IN (
+      SELECT job_id FROM apply_ledger
+      WHERE status IN ('claimed', 'submitted', 'external')
+  )
   -- 같은 canonical_key가 여러 플랫폼에 있으면 job_id가 가장 작은 것만 대표로 낸다.
   AND j.id = (
       SELECT MIN(j2.id) FROM jobs j2
@@ -414,7 +421,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
 #
 # 뷰마다 '이 문자열이 정의에 있어야 한다'를 적어두고, 없으면 지운다.
 # 그 뒤 SCHEMA가 다시 만든다. 뷰는 데이터를 갖지 않으므로 안전하다.
-VIEW_MARKERS = {"v_actionable": "'external'"}
+VIEW_MARKERS = {"v_actionable": "SELECT job_id FROM apply_ledger"}
 
 
 def _refresh_views(conn: sqlite3.Connection) -> None:

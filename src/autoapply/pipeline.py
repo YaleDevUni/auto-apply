@@ -28,6 +28,7 @@ from .db import (
     upsert_job,
 )
 from .http import Fetcher
+from .normalize import canonical_key
 from .paths import RECIPE_DIR
 from .screening import evaluate_applicability, screen
 from . import tasks
@@ -41,6 +42,37 @@ def _gap_counts(conn) -> dict[int, int]:
             "SELECT job_id, required_gaps FROM resume_builds WHERE required_gaps > 0"
         ).fetchall()
     }
+
+
+SETTLED = ("claimed", "submitted", "external")
+
+
+def _settled(conn) -> tuple[set[str], set[tuple[str, str]]]:
+    """다시 지원할 일이 없는 자리. (canonical_key 집합, (플랫폼, 공고id) 집합)
+
+    우리가 낸 것(claimed/submitted)과 사람이 예전에 직접 낸 것(external)이
+    같이 들어간다. 대기열(`v_actionable`)이 쓰는 규칙과 **같은 목록**이다 —
+    한쪽만 고치면 "대기열엔 안 뜨는데 상세는 매일 받는" 상태가 된다.
+
+    **두 가지로 본다.** canonical_key는 회사명+제목의 해시라 플랫폼이 달라도
+    같은 자리를 잡아주지만, **제목이 바뀌면 키도 바뀐다.** 원장의 키는 적을
+    때 값으로 굳어 있고 수집은 매번 새 제목으로 키를 다시 계산하므로, 회사가
+    공고 제목을 한 글자만 고쳐도 그 자리가 '처음 보는 자리'로 돌아온다
+    (실측 2026-08-16: 공고 4110의 제목을 고쳤더니 키가 갈려 상세 조회가
+    다시 나갔다). 플랫폼 공고 id는 그런 일이 없으므로 같이 본다.
+    """
+    keys, ids = set(), set()
+    for r in conn.execute(
+        "SELECT l.canonical_key AS k, j.platform AS p, j.platform_job_id AS pid "
+        "FROM apply_ledger l LEFT JOIN jobs j ON j.id = l.job_id "
+        f"WHERE l.status IN ({','.join('?' * len(SETTLED))})",
+        SETTLED,
+    ):
+        if r["k"]:
+            keys.add(r["k"])
+        if r["p"] and r["pid"]:
+            ids.add((r["p"], str(r["pid"])))
+    return keys, ids
 
 
 log = logging.getLogger(__name__)
@@ -90,15 +122,35 @@ def run_platform(
 
             passed = [(j, v) for j, v in staged if v["verdict"] == "pass"]
             passed.sort(key=lambda t: t[1]["fit_score"], reverse=True)
+
+            # 이미 끝난 자리는 **상세를 받지 않는다.**
+            #
+            # 목록 API에는 "이건 빼고 줘"가 없으므로 목록에 실려 오는 것 자체는
+            # 못 막는다. 실제 비용은 그다음이다 — 상세 조회는 공고 하나당 요청
+            # 하나이고, 여기가 수집 시간의 거의 전부다. 게다가 detail_limit(800)
+            # 자리를 하나 차지하므로, 다시 낼 일 없는 공고가 **진짜 후보를
+            # 밀어낸다.**
+            #
+            # canonical_key는 목록 데이터(회사명+제목)만으로 만들어진다 —
+            # 상세를 받아봐야 아는 값이 아니라서 받기 전에 거를 수 있다.
+            settled_keys, settled_ids = _settled(conn)
+            fresh = [
+                (j, v) for j, v in passed
+                if canonical_key(j.company, j.title) not in settled_keys
+                and (j.platform, str(j.platform_job_id)) not in settled_ids
+            ]
+            counts["settled_skipped"] = len(passed) - len(fresh)
             log.info(
-                "[%s] 수집 %d건 → 1차 통과 %d건 (제외 %d건, 상세요청은 통과분만)",
-                platform, counts["found"], len(passed), counts["found"] - len(passed),
+                "[%s] 수집 %d건 → 1차 통과 %d건 (제외 %d건) · 이미 끝난 자리 %d건은 "
+                "상세 조회 생략",
+                platform, counts["found"], len(passed),
+                counts["found"] - len(passed), counts["settled_skipped"],
             )
 
             # --- 2차: 통과분만 상세 조회 ---
             enrich = getattr(adapter, "enrich", None)
             if not stopped and enrich and s.get("fetch_detail", True):
-                for n, (job, _) in enumerate(passed[: s.get("detail_limit", 120)]):
+                for n, (job, _) in enumerate(fresh[: s.get("detail_limit", 120)]):
                     # 여기가 제일 긴 구간이다(상세 800건 = 수 분~수십 분).
                     # 중단을 눌렀을 때 실제로 멈추는 자리도 대개 여기다.
                     if tasks.cancelled():
