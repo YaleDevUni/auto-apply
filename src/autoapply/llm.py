@@ -57,6 +57,23 @@ class UsageLimited(RuntimeError):
     """
 
 
+class LoginExpired(RuntimeError):
+    """claude 로그인이 만료됐다. **사람이 다시 로그인해야만** 풀린다.
+
+    한도와 갈라놓는 이유는 회복 방식이 정반대라서다. 한도는 기다리면 풀리므로
+    다음 새벽 실행이 이어받으면 되지만, 로그인 만료는 **아무리 기다려도 안
+    풀린다** — 그대로 두면 매 사이클이 같은 자리에서 죽으면서 자리만 태운다.
+
+    예외형으로 안 오고 메시지로만 온다: `claude -p`가 exit 1 + "Login expired ·
+    Please run /login"을 내고, llm.ask는 그걸 RuntimeError로 감쌌다. 그래서
+    `raise_if_limited_failure`가 메시지를 보고 여기서 갈라준다.
+
+    풀려면 사람이 터미널에서 `claude` → `/login`, 또는 무인 실행이면
+    `claude setup-token`으로 1년짜리 토큰을 받아 launchd plist의
+    CLAUDE_CODE_OAUTH_TOKEN에 넣는다.
+    """
+
+
 # 한도에 걸렸을 때 나오는 문구. **성공 응답에는 절대 없는 것만** 넣는다.
 #
 # 처음엔 "429"도 넣었다가 성공 응답을 한도로 오판했다 — 응답 JSON의 토큰 수나
@@ -113,6 +130,25 @@ def _explain_failure(raw: str) -> tuple[str, dict | None]:
 # 걸린다(재현 확인). 이 목록은 exit≠0 일 때만 대므로 그 오염 경로를 안 탄다.
 _LIMIT_MARKERS_FAILED = ("session limit", "spend limit", "hit your")
 
+# 로그인이 만료됐을 때 나오는 문구. **실패한 실행에서만** 본다.
+#
+# 한도 문구와 같은 자리에서 오지만 뜻이 정반대다 — 한도는 기다리면 풀리고
+# 이건 사람이 다시 로그인해야 풀린다. 한 덩어리로 묶으면 로그인 만료를 "다음
+# 새벽에 다시 하자"로 처리하게 되고, 그 새벽도 똑같이 죽는다.
+#
+# claude CLI가 v2.1.206부터 이 문구를 명시적으로 낸다(그 전엔 모델 오류처럼
+# 보였다). 'please run /login'을 같이 보는 이유는 앞부분 문구가 버전에 따라
+# 달라져도 이 안내는 남기 때문이다.
+_LOGIN_MARKERS_FAILED = ("login expired", "please run /login", "run /login to renew")
+
+
+def _raise_if_login_expired(text: str) -> None:
+    """실패한 호출에서만 부른다. 한도 판정보다 **먼저** 봐야 한다 —
+    'session limit'과 로그인 안내가 한 봉투에 같이 오는 경우가 있다."""
+    low = (text or "").lower()
+    if any(m in low for m in _LOGIN_MARKERS_FAILED):
+        raise LoginExpired(text.strip()[:300])
+
 
 def _raise_if_limited_payload(payload: dict | None) -> None:
     """파싱된 실패 봉투 버전. `_raise_if_limited`와 나란히, 대신한다."""
@@ -138,6 +174,10 @@ def raise_if_limited_failure(stdout: str, stderr: str = "") -> str:
     """
     combined = (stdout or "") + (stderr or "")
     message, payload = _explain_failure(stdout or stderr or "")
+    # 로그인 만료를 한도보다 먼저 본다. 회복 방식이 정반대라(기다리기 vs 재로그인)
+    # 한도로 잘못 읽으면 "다음 새벽에 다시 하자"가 되고 그 새벽도 똑같이 죽는다.
+    _raise_if_login_expired(message)
+    _raise_if_login_expired(combined)
     _raise_if_limited_payload(payload)  # 봉투가 파싱되면 이쪽이 더 정확하다
     _raise_if_limited(combined)         # 기존 한글·usage limit 목록(회귀 방지)
     low = combined.lower()

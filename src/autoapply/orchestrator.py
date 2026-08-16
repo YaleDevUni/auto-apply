@@ -75,7 +75,7 @@ from typing import Any
 
 from .config import effective_config
 from .db import connect, now
-from .llm import UsageLimited, raise_if_limited_failure
+from .llm import LoginExpired, UsageLimited, raise_if_limited_failure
 from .notify import telegram
 from .paths import CODE_ROOT
 
@@ -546,10 +546,15 @@ def plan(conn: sqlite3.Connection | None = None, *, limit: int = 1) -> dict[str,
                 f"{item['task']}\n\n{PLAN_FORMAT}",
                 role="planner", system=PLANNER_SYSTEM, tools=PLANNER_TOOLS,
             )
-        except UsageLimited as e:
+        except (UsageLimited, LoginExpired) as e:
+            # 알림 문구를 여기서 다시 쓰지 않는다. 무엇이 막았고 무엇을 해야
+            # 푸는지는 errors 쪽에 한 벌만 있어야 한다 — 두 벌이면 로그인
+            # 만료를 "기다리면 풀립니다"로 안내하는 쪽이 반드시 생긴다.
+            from . import errors
+
             release_fix_hold(conn)
-            telegram.notify(conn, f"⏳ 사용 한도 — 계획을 다음으로 미룹니다.\n<i>{e}</i>")
-            return {"planned": 0, "reason": "사용 한도"}
+            errors.record(conn, kind="plan", exc=e, command="plan")
+            return {"planned": 0, "reason": type(e).__name__}
         except Exception as e:  # noqa: BLE001
             release_fix_hold(conn)
             log.warning("계획 수립 실패: %s", e)
@@ -757,9 +762,13 @@ def execute(conn: sqlite3.Connection | None = None, plan_id: int = 0) -> dict[st
                 _git("add", "-A")
                 _git("commit", "-q", "-m", _commit_message(row))
                 result.update(_land(conn, row, origin, branch))
-        except UsageLimited as e:
-            # 한도는 고장이 아니다. 계획을 살려두고 물러난다.
-            result.update(status="requeued", reason=str(e)[:200])
+        except (UsageLimited, LoginExpired) as e:
+            # 한도도 로그인 만료도 고장이 아니다 — 계획을 살려두고 물러난다.
+            # (푸는 방법은 다르지만, 여기서 할 일은 "계획을 버리지 않는다"로 같다.)
+            from . import errors
+
+            errors.record(conn, kind="fix-run", exc=e, command=f"fix-run {plan_id}")
+            result.update(status="requeued", reason=f"{type(e).__name__}: {str(e)[:180]}")
             conn.execute(
                 "UPDATE fix_plans SET status=? WHERE id=?",
                 ("approved" if row["auto"] == 0 else "pending", plan_id),

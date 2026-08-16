@@ -65,12 +65,30 @@ EXTERNAL_SIGNS = (
 )
 
 # 전용 처리 경로가 이미 있는 것들. 고장이 아니거나, 고장이어도 다른 데서 다룬다.
-#   UsageLimited  한도 — 자리를 붙잡고 나중에 재개한다 (orchestrator._one)
 #   BrowserBusy   경합 — 안내하고 조용히 끝낸다 (cli.py)
-#   LoginRequired 로그인 — 사람을 부른다 (agent.notify_login_required)
+#   LoginRequired 플랫폼(원티드) 로그인 — 사람을 부른다 (agent.notify_login_required)
 #   Cancelled     사람이 멈춘 것
-SKIP_TYPES = {"UsageLimited", "BrowserBusy", "LoginRequired", "Cancelled", "SystemExit",
+SKIP_TYPES = {"BrowserBusy", "LoginRequired", "Cancelled", "SystemExit",
               "KeyboardInterrupt", "TelegramNotConfigured"}
+
+# **LLM을 쓸 수 없는 상태.** 큐에 안 넣는 건 SKIP과 같지만, 조용히 버리지 않고
+# 원인을 반드시 폰에 보낸다.
+#
+# 예전에 UsageLimited가 SKIP_TYPES에 있었다. 주석은 "전용 경로가 있다
+# (orchestrator._one)"였는데 그 함수는 진작 사라졌고, 남아 있는 전용 경로는
+# orchestrator.plan()/execute() 둘뿐이다. **이력서 작성 경로(llm.ask)에는
+# 없었다** — 한도에 걸리면 cli.py 최상단까지 올라와 여기서 조용히 버려지고
+# 프로세스가 죽었다. 폰에는 한 글자도 안 갔고, 로그도 /dev/null이었다.
+# 실측(2026-08-17 새벽): 사람이 아침에 "왜 아무것도 안 했지"로 알았다.
+#
+# 큐에 안 넣는 이유는 그대로다 — 여기에 고칠 코드가 없다. 기다리거나(한도)
+# 다시 로그인해야(만료) 풀린다. 그래서 계획 에이전트를 띄우면 그 에이전트도
+# 같은 이유로 죽는다.
+BLOCKED_TYPES = {"UsageLimited", "LoginExpired", "ClaudeUnavailable"}
+
+# 같은 이유로 몇 시간에 한 번만 깨운다. 한 사이클이 공고 여러 건을 도는 동안
+# 같은 한도에 여러 번 걸리므로, 쿨다운이 없으면 한 번의 한도가 폰을 도배한다.
+BLOCKED_ALERT_COOLDOWN_HOURS = 1.0
 
 # 같은 지문이어도 이 시간이 지나면 external을 다시 보고한다. 오늘 새로 난
 # 장애는 지난주에 같은 지문을 본 적이 있어도 알려야 한다.
@@ -185,6 +203,13 @@ def _record(
     if exc_type in SKIP_TYPES:
         return {"recorded": False, "reason": f"{exc_type}은 전용 경로가 있다"}
 
+    # LLM을 못 쓰는 상태 — 큐에 넣을 것은 없지만 **원인은 반드시 알린다.**
+    if exc_type in BLOCKED_TYPES:
+        return {
+            "recorded": False, "blocked": exc_type,
+            "notified": _notify_blocked(conn, exc_type, message, command) if notify else False,
+        }
+
     klass = classify(exc_type, message)
     fp = fingerprint(kind, exc_type, message)
     stamp = now()
@@ -230,6 +255,64 @@ def _record(
     if klass == "actionable" and is_new:
         result["planning"] = _trigger_plan(conn, command)
     return result
+
+
+# 무엇이 막았고, 사람이 무엇을 해야 푸는가. 셋의 회복 방식이 전부 다르다 —
+# 한 줄로 뭉뚱그리면 "기다리면 되나 로그인해야 하나"를 폰에서 못 가린다.
+_BLOCKED_TEXT = {
+    "UsageLimited": (
+        "⏳ <b>Claude 사용 한도</b> — 자동지원을 멈춥니다",
+        "시간이 지나면 풀립니다. 다음 새벽 사이클이 이어서 합니다.",
+    ),
+    "LoginExpired": (
+        "🔑 <b>Claude 로그인 만료</b> — 기다려도 안 풀립니다",
+        "터미널에서 <code>claude</code> 실행 후 <code>/login</code>.\n"
+        "무인 실행용으로는 <code>claude setup-token</code>으로 1년짜리 토큰을 받아 "
+        "launchd plist의 <code>CLAUDE_CODE_OAUTH_TOKEN</code>에 넣으면 "
+        "이 만료를 안 겪습니다.",
+    ),
+    "ClaudeUnavailable": (
+        "❓ <b>claude CLI를 찾을 수 없습니다</b>",
+        "PATH 문제입니다. run.sh를 안 거치는 launchd 잡은 plist의 "
+        "<code>EnvironmentVariables/PATH</code>를 따로 챙겨야 합니다.",
+    ),
+}
+
+
+def _notify_blocked(
+    conn: sqlite3.Connection, exc_type: str, message: str, command: str
+) -> bool:
+    """LLM을 못 쓰는 이유를 폰에 보낸다. 같은 이유로는 쿨다운 안에서 한 번만.
+
+    쿨다운이 필요한 이유: 한 사이클이 공고 여러 건을 도는 동안 같은 한도에
+    매번 걸린다. 그대로 보내면 한 번의 한도가 폰을 수십 통으로 도배하고,
+    도배된 알림은 통째로 무시된다 — 정작 다음에 진짜 고장이 왔을 때 안 읽힌다.
+    """
+    import html
+
+    from .db import get_setting, set_setting
+    from .notify import telegram
+
+    key = f"llm_blocked_last_alert:{exc_type}"
+    last = get_setting(conn, key, "")
+    if last and _hours_since(last) < BLOCKED_ALERT_COOLDOWN_HOURS:
+        return False
+
+    head, how = _BLOCKED_TEXT.get(
+        exc_type, (f"⛔️ <b>{html.escape(exc_type)}</b>", "원인을 확인해 주세요.")
+    )
+    lines = [head, ""]
+    if command:
+        lines.append(f"<code>{html.escape(command[:120])}</code>")
+    # 원인 원문을 그대로 붙인다. 이게 없으면 "한도"라는 사실만 알고 언제
+    # 풀리는지를 모른다 — claude가 내는 문구에 리셋 시각이 들어 있다.
+    lines.append(f"<i>{html.escape((message or '').strip()[:300])}</i>")
+    lines.append(f"\n{how}")
+
+    if telegram.notify(conn, "\n".join(lines)):
+        set_setting(conn, key, now())
+        return True
+    return False
 
 
 def _notify(
