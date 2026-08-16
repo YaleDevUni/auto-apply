@@ -99,14 +99,19 @@ def _explain_failure(raw: str) -> tuple[str, dict | None]:
     return message[:500], payload
 
 
-# 파싱된 실패 봉투에서만 보는 영어 한도 문구. 실측: api_error_status:429,
-# result:"You've hit your session limit · resets 9:50pm (Asia/Seoul)".
+# **실패한 실행에서만** 보는 영어 한도 문구. 실측 두 가지:
 #
-# `_LIMIT_MARKERS`에 합치지 않는다 — orchestrator._agent가 코딩 에이전트의
-# 출력 전문을 그대로 `_raise_if_limited`에 넘기는데, 거기엔 한도를 논의하는
-# 계획문만 있어도 걸린다(재현 확인). 여기 목록은 claude CLI 오류 봉투를
-# 실제로 파싱했을 때만 검사하므로 그 오염 경로를 안 탄다.
-_LIMIT_MARKERS_PAYLOAD = ("session limit", "hit your")
+#   봉투    api_error_status:429 / result:"You've hit your session limit · resets 9:50pm"
+#   평문    exit 1 + stdout 한 줄 "You've hit your monthly spend limit · raise it at ..."
+#
+# 뒤엣것은 JSON이 아니라 `_explain_failure`가 봉투를 못 만든다. 그래서 파싱
+# 결과만 보면 한도가 그냥 실패로 새고, 계획 자리에서는 그 안내문이 계획 본문이
+# 된다(실측: 계획 #4가 이 한 줄로 저장됐다).
+#
+# `_LIMIT_MARKERS`에 합치지 않는다 — orchestrator._agent가 **성공** 출력 전문을
+# `_raise_if_limited`에 넘기는데, 거기엔 한도를 논의하는 계획문만 있어도
+# 걸린다(재현 확인). 이 목록은 exit≠0 일 때만 대므로 그 오염 경로를 안 탄다.
+_LIMIT_MARKERS_FAILED = ("session limit", "spend limit", "hit your")
 
 
 def _raise_if_limited_payload(payload: dict | None) -> None:
@@ -116,8 +121,29 @@ def _raise_if_limited_payload(payload: dict | None) -> None:
     if payload.get("api_error_status") == 429:
         raise UsageLimited(str(payload.get("result") or "사용 한도")[:300])
     result = str(payload.get("result") or "").lower()
-    if any(m in result for m in _LIMIT_MARKERS_PAYLOAD):
+    if any(m in result for m in _LIMIT_MARKERS_FAILED):
         raise UsageLimited(str(payload.get("result"))[:300])
+
+
+def raise_if_limited_failure(stdout: str, stderr: str = "") -> str:
+    """exit≠0 인 claude 실행 하나를 판정한다. **성공 출력에는 절대 쓰지 않는다.**
+
+    한도면 `UsageLimited`를 던지고, 아니면 사람이 읽을 실패 메시지를 돌려준다.
+    한도를 일반 실패와 가르는 값은 `plan()`·`_one()`이 자리를 큐로 되돌려
+    나중에 다시 하느냐, 고장으로 기록하고 끝내느냐다.
+
+    한도 판정을 이 한 곳에 모은 이유는 llm.ask()와 orchestrator._agent가 같은
+    claude CLI를 부르면서 판정을 따로 갖고 있었기 때문이다 — 한쪽만 고치면
+    나머지 한쪽에서 같은 한도가 또 샌다.
+    """
+    combined = (stdout or "") + (stderr or "")
+    message, payload = _explain_failure(stdout or stderr or "")
+    _raise_if_limited_payload(payload)  # 봉투가 파싱되면 이쪽이 더 정확하다
+    _raise_if_limited(combined)         # 기존 한글·usage limit 목록(회귀 방지)
+    low = combined.lower()
+    if any(m in low for m in _LIMIT_MARKERS_FAILED):
+        raise UsageLimited((message or combined).strip()[:300])
+    return message
 
 
 def cli_available() -> bool:
@@ -209,10 +235,7 @@ def ask(
     # 한도 판정은 **실패했을 때만** 한다. 성공 응답 본문에는 토큰 수·소요시간이
     # 들어 있어 무엇을 찾든 우연히 걸릴 수 있다.
     if proc.returncode != 0:
-        combined = (proc.stdout or "") + (proc.stderr or "")
-        message, fail_payload = _explain_failure(proc.stdout or proc.stderr or "")
-        _raise_if_limited_payload(fail_payload)  # 파싱됐으면 이쪽이 먼저다 — 더 정확하다.
-        _raise_if_limited(combined)  # 비-JSON 출력 대비 폴백(회귀 방지).
+        message = raise_if_limited_failure(proc.stdout or "", proc.stderr or "")
         raise RuntimeError(f"claude 실행 실패 (exit {proc.returncode}): {message}")
 
     try:
@@ -289,10 +312,7 @@ def ask_session(
         ) from exc
 
     if proc.returncode != 0:
-        combined = (proc.stdout or "") + (proc.stderr or "")
-        message, fail_payload = _explain_failure(proc.stdout or proc.stderr or "")
-        _raise_if_limited_payload(fail_payload)
-        _raise_if_limited(combined)
+        message = raise_if_limited_failure(proc.stdout or "", proc.stderr or "")
         raise RuntimeError(f"claude 실행 실패 (exit {proc.returncode}): {message}")
 
     try:
