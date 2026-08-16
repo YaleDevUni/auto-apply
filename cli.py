@@ -287,17 +287,13 @@ def main() -> int:
         else:
             _out(orchestrator.run(limit=args.limit))
     elif args.cmd == "resumes":
-        from src.autoapply.db import connect as _c, get_setting
         from src.autoapply.runner import resume_editor
 
-        conn = _c()
-        preview = get_setting(conn, "preview_resume_url", "")
-        conn.close()
         if args.cleanup:
             _out(resume_editor.cleanup(dry_run=False))
         else:
             _out({
-                "미리보기용": preview or "미지정",
+                "보호(편집·삭제 금지)": sorted(resume_editor.protected_titles()),
                 "정리 예정": resume_editor.cleanup(dry_run=True),
                 "안내": "실제로 지우려면 --cleanup. 로컬 사본(profile/generated)은 남습니다",
             })
@@ -455,46 +451,27 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
     out = []
     for t in targets:
         try:
-            # 무인 사이클에서는 미리보기용 이력서 하나를 덮어쓰며 재사용한다.
+            # 준비도 **매번 사본에서 시작한다.** 이력서 하나를 덮어쓰며
+            # 재사용하던 경로는 2026-08-16에 지웠다 — 아껴지는 것보다 깨지는
+            # 게 훨씬 컸다:
             #
-            # 사본 경로가 들어온 뒤로 '작성 완료'는 정상 동작한다(공고 1025가
-            # `#9` 제목으로 실제 제출됨). 그래도 재사용하는 이유는 남았다:
-            # dry-run은 사람이 사진으로 판단하는 용도라 제출물이 아니고,
-            # 건마다 새로 만들면 **승인되지 않은 공고의 이력서까지 계정에 쌓인다.**
-            # 제출은 승인 시점에 그 공고용으로 다시 채운다(`autoapply --live`).
-            r = _autoapply(t["job_id"], resume_url=_preview_resume_url(), live=False)
+            #   · resume_url을 넘기면 `pick_template`이 통째로 무시된다.
+            #     영업 공고에 개발 이력서를 내지 않으려고 트랙별 사본메이커를
+            #     만들어놨는데, 무인 사이클은 그 분기를 한 번도 안 탔다.
+            #   · 재사용 대상이 '박예일 기본'으로 굳어 있었다. 스킬은 사본이
+            #     비어 있다는 전제로 **추가만** 하므로(prune 없음), 같은
+            #     이력서를 계속 덮어쓰면 공고마다 스킬이 쌓여 엉킨다.
+            #   · 실제로 그 상태로 공고 33에 제출까지 나갔다(apply_ledger id=4,
+            #     resume_title='박예일 기본').
+            #
+            # 쌓이는 이력서는 `resumes --cleanup`이 치운다 —
+            # `made_resumes`에 우리가 만든 것이 남으므로 근거가 있다.
+            r = _autoapply(t["job_id"], resume_url=None, live=False)
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
         _report_prepared(t, r, defer=defer)
     return {"prepared": len(out), "items": out}
-
-
-def _preview_resume_url() -> str | None:
-    """미리보기에 재사용할 이력서 URL. 없으면 None(새로 만든다).
-
-    건마다 새 이력서를 만들면 원티드 계정에 쌓인다. 미리보기는 사람이 사진으로
-    보고 판단하는 용도라 하나를 덮어쓰며 재사용해도 된다 — **제출 시점에
-    그 공고용으로 다시 채우기 때문이다**(`autoapply --live`).
-    """
-    from src.autoapply.db import connect as _c, get_setting
-
-    conn = _c()
-    try:
-        return get_setting(conn, "preview_resume_url", "") or None
-    finally:
-        conn.close()
-
-
-def _remember_preview_resume(url: str) -> None:
-    from src.autoapply.db import connect as _c, get_setting, set_setting
-
-    conn = _c()
-    try:
-        if url and not get_setting(conn, "preview_resume_url", ""):
-            set_setting(conn, "preview_resume_url", url)
-    finally:
-        conn.close()
 
 
 def _queue_notification(
@@ -910,7 +887,6 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
         template=None if resume_url else template,
         new_title=new_title, job_id=job_id, dry_run=False,
     )
-    _remember_preview_resume(filled.get("url", ""))
 
     # 등록 결과를 기록해두고, 지원 단계는 DB에서 읽는다. 화면에서 제목을 읽는
     # 것은 한 번뿐이고, 그 뒤로는 편집기 상태가 바뀌어도 흔들리지 않는다.

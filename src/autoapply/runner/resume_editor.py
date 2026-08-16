@@ -29,6 +29,28 @@ from .session import PlaywrightSession, browser
 log = logging.getLogger(__name__)
 
 
+class ProtectedResume(RuntimeError):
+    """건드리면 안 되는 이력서를 열었다. 채우기 전에 멈춘다.
+
+    2026-08-16 실측: 무인 사이클이 '박예일 기본'을 재사용하며 덮어썼고
+    (`preview_resume_url` 재사용 경로), 그 상태로 공고 33에 **실제 제출**까지
+    나갔다(apply_ledger id=4). 사본메이커·기본 이력서는 모든 이력서의 원본이라
+    한 번 오염되면 그 뒤 만드는 모든 사본이 같이 오염된다.
+
+    그래서 '실수로 열었을 때 조용히 채우는' 경로를 남겨두지 않는다. 예외로
+    던져 그 자리에서 멈춘다.
+    """
+
+
+def protected_titles() -> set[str]:
+    """편집·삭제 금지 이력서. config의 `resumes.protect`가 근거다."""
+    return {
+        str(t).strip()
+        for t in ((effective_config().get("resumes") or {}).get("protect") or [])
+        if str(t).strip()
+    }
+
+
 def _stamp() -> str:
     from datetime import datetime
 
@@ -1033,6 +1055,14 @@ def fill(
                 missing.append(key)
 
         title = read_title(p)
+
+        # 원본을 열었으면 여기서 멈춘다. 아래 한 줄만 지나가면 자동저장이라
+        # 되돌릴 수 없다 — 사본메이커가 오염되면 이후 모든 이력서가 오염된다.
+        if title in protected_titles():
+            raise ProtectedResume(
+                f"보호 이력서를 열었다: {title!r} ({url}) — 채우지 않고 멈춘다. "
+                "사본 경로(template)로 열어야 한다."
+            )
 
         if dry_run:
             return {
