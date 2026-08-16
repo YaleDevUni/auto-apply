@@ -630,6 +630,7 @@ def record_registration(
     resume_title: str,
     resume_url: str = "",
     skills: list[str] | None = None,
+    report: dict[str, Any] | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> None:
     """플랫폼에 등록된 결과를 기록한다.
@@ -674,6 +675,7 @@ def record_registration(
     resume_title: str,
     resume_url: str = "",
     skills: list[str] | None = None,
+    report: dict[str, Any] | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> None:
     """플랫폼에 등록된 이력서를 기록한다.
@@ -689,8 +691,12 @@ def record_registration(
     conn = conn or connect()
     try:
         conn.execute(
-            "UPDATE resume_builds SET resume_title=?, resume_url=?, skills=? WHERE job_id=?",
-            (resume_title, resume_url, json.dumps(skills or [], ensure_ascii=False), job_id),
+            """UPDATE resume_builds
+               SET resume_title=?, resume_url=?, skills=?, fill_report=?, completeness=?
+               WHERE job_id=?""",
+            (resume_title, resume_url, json.dumps(skills or [], ensure_ascii=False),
+             json.dumps(report or {}, ensure_ascii=False),
+             (report or {}).get("completeness"), job_id),
         )
         conn.commit()
     finally:

@@ -60,6 +60,9 @@ def main() -> int:
     sub.add_parser("blocked", help="막힌 이유 집계")
     sub.add_parser("quota", help="오늘 남은 지원 가능 건수")
 
+    bp = sub.add_parser("builds", help="이력서 조립·등록 기록 (왜 미완인지)")
+    bp.add_argument("--limit", type=int, default=8)
+
     hp = sub.add_parser("health", help="파이프라인 이상 감지 (LLM 0회)")
     hp.add_argument("--no-notify", action="store_true", help="텔레그램 알림 없이 확인만")
     hp.add_argument("--history", action="store_true", help="최근 스냅샷 추이")
@@ -159,6 +162,31 @@ def main() -> int:
         _out(agent.blocked_summary())
     elif args.cmd == "quota":
         _out(agent.quota())
+    elif args.cmd == "builds":
+        conn = connect()
+        try:
+            rows = conn.execute(
+                """SELECT b.job_id, j.company, b.resume_title, b.completeness,
+                          b.required_gaps, b.fill_report, b.built_at
+                   FROM resume_builds b LEFT JOIN jobs j ON j.id = b.job_id
+                   ORDER BY b.built_at DESC LIMIT ?""",
+                (args.limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+        out = []
+        for r in rows:
+            rep = json.loads(r["fill_report"] or "{}")
+            out.append({
+                "job_id": r["job_id"], "회사": r["company"],
+                "이력서": r["resume_title"], "완성도": r["completeness"],
+                "필수미충족": r["required_gaps"],
+                "저장안됨": rep.get("lost") or [],
+                "플랫폼이 요구": rep.get("platform_todo") or [],
+                "스킬누락": rep.get("skills_skipped") or [],
+                "작성완료": rep.get("finalized"),
+            })
+        _out(out)
     elif args.cmd == "health":
         from src.autoapply import health
 
@@ -409,6 +437,18 @@ def _submit(job_id: int) -> dict:
     return _apply_with(job, live=True)
 
 
+def _resume_title(job: dict) -> str:
+    """공고별 이력서 제목. 제목이 곧 지원 폼에서 이력서를 고르는 열쇠다.
+
+    회사명을 앞에 둔다. 목록에서 사람이 훑을 때 '어느 자리에 낸 것'인지가
+    먼저 보여야 하기 때문이다. 50자 제한이 있어 뒤를 자른다.
+    """
+    company = (job.get("company") or "").strip()
+    title = (job.get("title") or "").strip()
+    name = f"{company} {title}".strip() or "박예일 이력서"
+    return name[:50]
+
+
 def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     """조립 → 등록 → 지원. 각 단계가 다음 단계의 입력을 만든다.
 
@@ -430,7 +470,18 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
             "gaps": [g["text"][:70] for g in built["gaps"] if g.get("level") == "필수"],
         }
 
-    filled = resume_editor.fill(built["data"], resume_url=resume_url, dry_run=False)
+    # 사본메이커에서 시작한다. 어느 사본을 쓸지는 공고가 정한다 — 사본마다
+    # 용도가 다르고(개발자용·데브옵스·AX·영업), 그 결이 곧 이력서의 뼈대다.
+    job_row = _job(job_id)
+    template = resume_editor.pick_template(job_row)
+    new_title = _resume_title(job_row)
+    logging.getLogger(__name__).info("사본 선택: %s → %r", template, new_title)
+
+    filled = resume_editor.fill(
+        built["data"], resume_url=resume_url,
+        template=None if resume_url else template,
+        new_title=new_title, dry_run=False,
+    )
     _remember_preview_resume(filled.get("url", ""))
 
     # 등록 결과를 기록해두고, 지원 단계는 DB에서 읽는다. 화면에서 제목을 읽는
@@ -441,9 +492,10 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     assemble.record_registration(
         job_id, resume_title=title,
         resume_url=filled.get("url", ""), skills=filled.get("skills") or [],
+        report=resume_editor.fill_report(filled),
     )
 
-    job = _job(job_id, resume_title=title)
+    job = _job(job_id, resume_title=title, require_resume=True)
     result = _apply_with(job, live=live)
     return {
         "company": built["company"],
@@ -453,14 +505,19 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     }
 
 
-def _job(job_id: int, *, resume_title: str | None = None) -> dict:
-    """레시피가 쓸 공고 정보. 트랙에 맞는 이력서 제목까지 붙여서 돌려준다."""
+def _job(job_id: int, *, resume_title: str | None = None, require_resume: bool = False) -> dict:
+    """레시피가 쓸 공고 정보. 이력서 제목까지 붙여서 돌려준다.
+
+    require_resume는 **제출 직전에만** 켠다. 이력서를 만들기 전에 부를 때는
+    제목이 아직 없는 게 정상이라, 여기서 멈추면 만들 기회 자체가 없어진다.
+    """
     from src.autoapply.config import effective_config
 
     conn = connect()
     try:
         row = conn.execute(
-            """SELECT j.id AS job_id, j.platform, j.url, j.company, j.title, s.track
+            """SELECT j.id AS job_id, j.platform, j.url, j.company, j.title,
+                      j.description, s.track
                FROM jobs j LEFT JOIN screening s ON s.job_id = j.id
                WHERE j.id=?""",
             (job_id,),
@@ -475,7 +532,7 @@ def _job(job_id: int, *, resume_title: str | None = None) -> dict:
     # (이력서를 미리 만들어두고 트랙별로 고르던 예전 방식).
     resumes = effective_config().get("applicability", {}).get("resumes", {})
     job["resume"] = resume_title or (resumes.get(job["platform"], {}) or {}).get(job["track"])
-    if not job["resume"]:
+    if not job["resume"] and require_resume:
         # 여기서 멈추는 게 낫다. 이력서를 못 정한 채 진행하면 레시피가
         # 자리표시자를 못 채우거나, 더 나쁘게는 엉뚱한 이력서를 고른다.
         raise SystemExit(
@@ -492,7 +549,7 @@ def _apply(job_id: int, *, live: bool, headless: bool) -> dict:
 
     live일 때만 선점한다 — 그리고 선점이 실패하면(중복이거나 상한) 실행하지 않는다.
     """
-    return _apply_with(_job(job_id), live=live, headless=headless)
+    return _apply_with(_job(job_id, require_resume=True), live=live, headless=headless)
 
 
 def _notify_submitted(job: dict, result: dict) -> None:

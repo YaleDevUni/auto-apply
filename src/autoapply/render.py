@@ -136,6 +136,13 @@ def to_html(md: str, *, title: str = "이력서") -> str:
     )
 
 
+# --- 아래 두 함수는 현재 쓰이지 않는다 (2026-08-16) --------------------------
+# PDF 업로드로 이력서를 등록하는 경로를 노렸으나, 원티드 파일 선택은 OS 대화상자를
+# 띄워서 자동화가 닿지 않는다. 대신 '사본 만들기'로 완성된 이력서를 복제하는
+# 경로를 쓴다(config.yaml의 resumes.copy_from).
+#
+# 지우지 않고 남기는 이유: 사람인·자소설은 업로드형 지원이 흔하고, 그때 이
+# 변환기가 그대로 필요하다. 위의 to_html/CSS는 preview_image가 계속 쓴다.
 def to_pdf(md_path: Path | str, pdf_path: Path | str | None = None) -> Path:
     """MD를 A4 PDF로 굽는다. Chromium이 이미 있으므로 추가 설치가 없다."""
     from playwright.sync_api import sync_playwright

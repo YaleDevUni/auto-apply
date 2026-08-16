@@ -23,6 +23,7 @@ import logging
 import re
 from typing import Any
 
+from ..config import effective_config
 from .session import PlaywrightSession, browser
 
 log = logging.getLogger(__name__)
@@ -270,7 +271,10 @@ def _skill_variants(skill: str) -> list[str]:
 
 STATUS = re.compile(r"작성 (완료|중)|업로드 완료")
 # 제목 자리에 끼어드는 배지들
-BADGES = {"기본 이력서", "기본"}
+# 제목이 아닌데 제목 자리에 나타나는 줄. 메모가 비어 있으면 안내문이 그
+# 자리에 그려져서, 거르지 않으면 '더보기를 눌러 메모를 입력하세요.'가
+# 이력서 제목으로 잡힌다(실제로 잡혔다).
+BADGES = {"기본 이력서", "기본", "더보기를 눌러 메모를 입력하세요."}
 
 SKILL_ACTIVATOR = "text=직무 스킬"
 SKILL_INPUT = 'input[placeholder*="보유 스킬"]'
@@ -715,7 +719,18 @@ def _fields(platform: str = "wanted") -> dict[str, str]:
     return {**FIELDS, **(_editor_cfg(platform).get("fields") or {})}
 
 
-def audit(page, data: dict[str, Any]) -> dict[str, Any]:
+def _section_filled(page, field: str) -> bool:
+    """그 섹션의 첫 칸에 값이 남아 있는가. 사본이 들고 온 것을 지키는지 본다."""
+    loc = page.locator(_fields().get(field, ""))
+    if not loc.count():
+        return False
+    try:
+        return bool((loc.first.input_value() or "").strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def audit(page, data: dict[str, Any], *, steps: tuple[str, ...] | None = None) -> dict[str, Any]:
     """조립한 값이 **화면에 실제로 보이는지** 확인한다.
 
     필드 값 대조(`input_value()`)와 다른 층위다. 그쪽은 "내가 넣은 칸"만 보므로,
@@ -746,24 +761,50 @@ def audit(page, data: dict[str, Any]) -> dict[str, Any]:
         if value:
             checks[label] = value.strip()[:n] in body
 
+    # 우리가 안 쓴 섹션을 조립 JSON과 대조하면 안 된다. 사본이 들고 온 학력은
+    # 사람이 직접 넣은 값이고, LLM이 쓴 표기와 한 글자만 달라도 '누락'이 된다.
+    # 대신 **여전히 차 있는지**만 본다 — 우리가 망가뜨렸는지가 진짜 질문이다.
+    wrote = set(steps or ALL_STEPS)
+
     exps = data.get("experiences") or []
     edus = data.get("educations") or []
     if exps:
         has("회사", exps[0].get("company"))
         ach = (exps[0].get("achievements") or [{}])[0]
         has("주요성과", ach.get("title"))
-    for i, ed in enumerate(edus[:2]):
-        has(f"학교{i}", ed.get("school"))
+
+    if "education" in wrote:
+        for i, ed in enumerate(edus[:2]):
+            has(f"학교{i}", ed.get("school"))
+    else:
+        checks["학력 보존"] = _section_filled(page, "edu_school")
+
     has("간단소개", (data.get("summary") or "").splitlines()[0] if data.get("summary") else None)
     if data.get("skills"):
         checks["스킬"] = any(sk[:10] in body for sk in data["skills"][:5])
-    if data.get("links"):
-        has("링크", (data["links"][0] or {}).get("name"))
-    if data.get("languages"):
-        has("언어", (data["languages"][0] or {}).get("level"))
+
+    if "links" in wrote:
+        if data.get("links"):
+            has("링크", (data["links"][0] or {}).get("name"))
+        if data.get("languages"):
+            has("언어", (data["languages"][0] or {}).get("level"))
+    else:
+        checks["링크 보존"] = "http" in body
+
+    # 플랫폼이 표시하는 완성도와 미입력 안내도 같이 담는다. "무엇이 남았나"를
+    # 플랫폼이 직접 말해주므로, 우리 판단보다 이쪽이 근거로 강하다.
+    text = page.inner_text("body")
+    pct = re.search(r"(\d{1,3})\s*%", text)
+    todo = [ln.strip() for ln in text.splitlines() if "입력해주세요" in ln][:4]
 
     missing = [k for k, ok in checks.items() if not ok]
-    return {"checks": checks, "missing": missing, "ok": not missing}
+    return {
+        "checks": checks,
+        "missing": missing,
+        "ok": not missing,
+        "completeness": int(pct.group(1)) if pct else None,
+        "platform_todo": todo,
+    }
 
 
 def finalize(page) -> bool:
@@ -809,31 +850,67 @@ def read_title(page) -> str:
     return ""
 
 
-def open_editor(s: PlaywrightSession, *, resume_url: str | None = None) -> str:
-    """편집기를 연다. resume_url을 주면 그 이력서를, 아니면 새로 만든다.
+def open_editor(
+    s: PlaywrightSession,
+    *,
+    resume_url: str | None = None,
+    template: str | None = None,
+    new_title: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """편집기를 연다. (url, 메타) 를 돌려준다.
 
-    새로 만드는 건 클릭 한 번에 이력서가 실제로 생성된다는 뜻이다. 테스트로
-    반복하면 계정에 빈 이력서가 쌓이므로 되도록 기존 것을 재사용한다.
+    경로가 셋이다. 우선순위대로:
+
+        resume_url  그 이력서를 연다 (재사용·디버깅)
+        template    사본을 만들어 이름을 붙이고 연다  ← 기본 경로
+        (없음)      '새 이력서 작성'으로 빈 이력서를 만든다  ← 폴백
+
+    빈 이력서 경로를 지우지 않고 남겨둔 이유: 사본메이커가 계정에서 사라지면
+    (사람이 지우거나 이름이 바뀌면) 사본 경로가 통째로 막힌다. 그때 파이프라인이
+    멈추는 것보다 느리더라도 도는 편이 낫다.
     """
     if resume_url:
         s.goto(resume_url)
         s.page().wait_for_timeout(4000)
-        return s.url()
+        return s.url(), {"source": "reuse"}
+
+    if template:
+        s.goto(CV_URL)
+        page = s.page()
+        page.wait_for_timeout(4000)
+        made = prepare_from_template(
+            page, template=template, new_title=new_title or template,
+        )
+        if made.get("ok"):
+            return made["url"], {"source": "copy", **made}
+        log.warning("사본 경로 실패 — 빈 이력서로 넘어간다: %s", made.get("reason"))
 
     s.goto(CV_URL)
     s.page().wait_for_timeout(3500)
     s.click('button:has-text("새 이력서 작성") >> nth=0')
     s.page().wait_for_timeout(6000)
-    return s.url()
+    return s.url(), {"source": "blank"}
 
 
 ALL_STEPS = ("text", "experience", "education", "dates", "selects", "skills", "links")
+
+# 사본에서 시작할 때 손대는 단계. 학력·링크·언어·연락처는 사본이 이미 갖고 온다.
+#
+# 이게 왜 중요한가: 새 이력서를 처음부터 채우면 완성도가 71%에서 멈췄다. 원인은
+# 학력(입력은 되는데 저장이 안 됨)과 링크(입력칸 TimeoutError) 두 곳이었고,
+# 둘 다 **공고와 무관하게 매번 똑같은 값**이다. 매번 다시 채울 이유가 없었다.
+# 사본은 그 두 섹션을 이미 완성된 상태로 들고 오므로 실패할 일 자체가 없어진다.
+#
+# 공고마다 달라지는 것만 남는다: 간단 소개, 경력 성과, 스킬.
+COPY_STEPS = ("text", "experience", "dates", "selects", "skills")
 
 
 def fill(
     data: dict[str, Any],
     *,
     resume_url: str | None = None,
+    template: str | None = None,
+    new_title: str | None = None,
     dry_run: bool = True,
     headless: bool = False,
     only: tuple[str, ...] | None = None,
@@ -844,7 +921,9 @@ def fill(
     저장이라 입력 자체가 되돌리기 어렵다 — 셀렉터가 맞는지 먼저 확인한다.
     """
     with browser(headless=headless) as s:
-        url = open_editor(s, resume_url=resume_url)
+        url, origin = open_editor(
+            s, resume_url=resume_url, template=template, new_title=new_title,
+        )
         p = s.page()
 
         found: dict[str, bool] = {}
@@ -861,12 +940,14 @@ def fill(
 
         if dry_run:
             return {
-                "url": url, "title": title, "dry_run": True,
+                "url": url, "title": title, "dry_run": True, "origin": origin,
                 "found": found, "missing": missing,
                 "note": "입력하지 않음. 셀렉터 확인만 했다.",
             }
 
-        steps = only or ALL_STEPS
+        # 사본에서 왔으면 학력·링크·언어는 이미 완성돼 있다. 손대면 되레
+        # 저장이 안 되거나 타임아웃으로 실패하던 자리다 — 지나간다.
+        steps = only or (COPY_STEPS if origin["source"] == "copy" else ALL_STEPS)
 
         # 단일 필드부터. 계정이 채워주는 값은 건드리지 않는다.
         for key in ("summary", "ai_usage") if "text" in steps else ():
@@ -928,7 +1009,10 @@ def fill(
                         dates[f"ach{i}_start"] = _set_date(p, slots[f"ach{i}_start"], a["start"])
                     if a.get("end"):
                         dates[f"ach{i}_end"] = _set_date(p, slots[f"ach{i}_end"], a["end"])
-            for j, ed in enumerate(edus):
+            # 학력 날짜는 학력 단계를 켰을 때만 만진다. 사본에는 이미 들어
+            # 있고, 재학기간은 공고에 따라 달라지는 값이 아니다. 그런데도
+            # 손대면 저장이 안 되는 자리라 완성도만 도로 깎였다.
+            for j, ed in enumerate(edus if "education" in steps else []):
                 if ed.get("start"):
                     dates[f"edu{j}_start"] = _set_date(p, slots[f"edu{j}_start"], ed["start"])
                 if ed.get("end"):
@@ -941,12 +1025,16 @@ def fill(
         selects: dict[str, bool] = {}
         if "selects" in steps and exps:
             selects["재직 형태"] = _set_select(p, "재직 형태", "정규직")
-        if "selects" in steps and edus:
+        # 졸업 상태도 학력이다. 사본이 이미 갖고 있다.
+        if "selects" in steps and "education" in steps and edus:
             selects["졸업 상태"] = _set_select(p, "졸업 상태", "졸업")
 
         skills, skills_skipped = (
             _fill_skills(p, data.get("skills") or []) if "skills" in steps else ([], [])
         )
+        # 링크·어학은 **빈 이력서 폴백에서만** 돈다. 사본에는 이미 들어 있고,
+        # 링크 입력칸은 TimeoutError로 못 잡던 자리다(완성도 71%의 절반이 이것).
+        # 폴백을 지우지 않는 이유는 사본메이커가 계정에서 사라질 수 있어서다.
         links = _fill_links(p, data.get("links") or []) if "links" in steps else []
         langs = _fill_languages(p, data.get("languages") or []) if "links" in steps else []
 
@@ -963,7 +1051,7 @@ def fill(
         lost = [k for k, ok in persisted.items() if not ok]
 
         # 화면 수준 점검. 값 대조가 통과해도 섹션이 미완성일 수 있다.
-        page_audit = audit(p, data)
+        page_audit = audit(p, data, steps=tuple(steps))
         if not page_audit["ok"]:
             log.warning("화면에서 확인되지 않는 항목: %s", page_audit["missing"])
 
@@ -972,7 +1060,8 @@ def fill(
         finalized = finalize(p)
 
         return {
-            "url": url, "title": title, "dry_run": False,
+            "url": url, "title": title, "dry_run": False, "origin": origin,
+            "steps": list(steps),
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
             "dates": dates, "selects": selects, "finalized": finalized,
@@ -981,6 +1070,151 @@ def fill(
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
         }
+
+
+def pick_template(job: dict[str, Any]) -> str:
+    """공고에 맞는 사본메이커를 고른다.
+
+    사본마다 용도가 다르다(개발자용·데브옵스·AX·영업). 트랙만으로는 갈리지
+    않는 결이 있어서 — '개발'이라는 한 트랙 안에 인프라 공고와 LLM 공고가 같이
+    들어온다 — 키워드를 트랙보다 먼저 본다. 키워드가 안 걸리면 트랙, 그것도
+    없으면 기본값이다.
+    """
+    cfg = (effective_config().get("resumes") or {}).get("copy_from") or {}
+    text = " ".join(
+        str(job.get(k) or "") for k in ("title", "company", "description", "position")
+    ).lower()
+
+    for template, words in (cfg.get("by_keyword") or {}).items():
+        if any(str(w).lower() in text for w in words or []):
+            return template
+
+    by_track = cfg.get("by_track") or {}
+    return by_track.get(job.get("track") or "") or cfg.get("default") or ""
+
+
+def prepare_from_template(
+    page, *, template: str, new_title: str
+) -> dict[str, Any]:
+    """사본을 만들고 이름을 붙인 뒤 편집기를 연다.
+
+    반환한 url이 그 이력서의 유일한 손잡이다. 제목은 사람이 읽으라고 붙이는
+    것이고, 같은 이름이 두 개 생겨도 url은 겹치지 않는다.
+    """
+    copy_title = duplicate_resume(page, template)
+    if not copy_title:
+        return {"ok": False, "reason": f"사본 실패: {template}"}
+
+    renamed = rename_resume(page, copy_title, new_title)
+    title = new_title if renamed else copy_title
+
+    row = page.locator(f'{ROW}:has(span:text-is("{title}"))').first
+    if not row.count():
+        return {"ok": False, "reason": f"사본을 목록에서 못 찾았다: {title}"}
+    row.click()
+    page.wait_for_timeout(4500)
+
+    return {"ok": True, "title": title, "url": page.url,
+            "template": template, "renamed": renamed}
+
+
+def _open_row_menu(page, title: str):
+    """목록 행의 ⋯ 메뉴를 연다. 못 열면 None."""
+    row = page.locator(f'{ROW}:has(span:text-is("{title}"))').first
+    if not row.count():
+        log.info("목록에 없다: %s", title)
+        return None
+    row.scroll_into_view_if_needed()
+    page.wait_for_timeout(400)
+    row.hover()
+    page.wait_for_timeout(700)
+    btn = row.locator("button")
+    if not btn.count():
+        log.info("⋯ 버튼이 없다(기본 이력서일 수 있다): %s", title)
+        return None
+    btn.first.click(force=True)
+    page.wait_for_timeout(1200)
+    return row
+
+
+def duplicate_resume(page, source_title: str) -> str | None:
+    """사본을 만든다. 새로 생긴 이력서의 제목을 돌려준다.
+
+    원티드는 사본을 '{원본} 사본'으로 만들고 **바로 '작성 완료' 상태**로 둔다.
+    빈 이력서를 만들어 전부 채우는 것과 결정적으로 다른 점이다 — 완성에 필요한
+    필수 섹션이 이미 다 차 있으므로, 우리가 실패할 수 있는 표면이 줄어든다.
+
+    제목으로 새 사본을 찾는다. id를 돌려주지 않기 때문인데, 목록 스냅샷을
+    앞뒤로 비교하면 무엇이 새로 생겼는지는 확실히 안다.
+    """
+    before = {r["title"] for r in list_resumes_on(page)}
+    if not _open_row_menu(page, source_title):
+        return None
+
+    item = page.locator("text=사본 만들기").first
+    if not item.count():
+        log.warning("'사본 만들기' 메뉴가 없다: %s", source_title)
+        page.keyboard.press("Escape")
+        return None
+    item.click(force=True)
+    page.wait_for_timeout(3000)
+
+    page.goto(CV_URL)
+    page.wait_for_timeout(4500)
+    new = [r["title"] for r in list_resumes_on(page) if r["title"] not in before]
+    if not new:
+        log.warning("사본이 생기지 않았다: %s", source_title)
+        return None
+    log.info("사본 생성: %s → %s", source_title, new[0])
+    return new[0]
+
+
+def rename_resume(page, old_title: str, new_title: str) -> bool:
+    """이력서 제목을 바꾼다.
+
+    제목이 곧 지원 폼에서 이력서를 고르는 열쇠다(`li:has(span:text-is(...))`).
+    사본은 전부 '{원본} 사본'이라 그대로 두면 같은 이름이 여럿 생기고, 그러면
+    무엇을 제출하는지 알 수 없게 된다. 만들자마자 공고별 이름으로 바꾼다.
+    """
+    if not _open_row_menu(page, old_title):
+        return False
+
+    item = page.locator("text=이력서 제목 변경").first
+    if not item.count():
+        log.warning("'이력서 제목 변경' 메뉴가 없다: %s", old_title)
+        page.keyboard.press("Escape")
+        return False
+    item.click(force=True)
+    page.wait_for_timeout(1500)
+
+    # 입력칸이 input이 아닐 수 있다. 무엇으로 그렸든 값을 넣을 수 있는 것을 찾는다.
+    box = page.locator(
+        "[role=dialog] input, [role=dialog] textarea, [role=dialog] [contenteditable='true']"
+    ).first
+    if not box.count():
+        log.warning("제목 입력칸을 못 찾았다")
+        page.keyboard.press("Escape")
+        return False
+
+    box.click()
+    page.keyboard.press("Meta+A")
+    page.keyboard.press("Backspace")
+    box.type(new_title[:50], delay=20)
+    page.wait_for_timeout(400)
+
+    save = page.locator('[role=dialog] button:has-text("저장")').first
+    if not save.count():
+        page.keyboard.press("Escape")
+        return False
+    save.click(force=True)
+    page.wait_for_timeout(2500)
+
+    page.goto(CV_URL)
+    page.wait_for_timeout(4000)
+    ok = any(r["title"] == new_title for r in list_resumes_on(page))
+    if not ok:
+        log.warning("제목이 바뀌지 않았다: %s → %s", old_title, new_title)
+    return ok
 
 
 def list_resumes(*, headless: bool = False) -> list[dict[str, str]]:
@@ -1034,22 +1268,15 @@ def delete_resume(page, title: str) -> bool:
     호출부가 **무엇을 지울지 먼저 판단해야 한다.** 이 함수는 판단하지 않는다 —
     제출에 쓰인 이력서를 지우면 그 기록이 사라진다.
     """
-    row = page.locator(f'{ROW}:has(span:text-is("{title}"))').first
-    if not row.count():
+    # 같은 제목이 여럿일 수 있다. '하나 줄었나'로 판정해야 한다 — '제목이
+    # 사라졌나'로 보면 쌍둥이가 남아 있을 때 성공을 실패로 읽는다(실제로 읽었다).
+    before = sum(1 for r in list_resumes_on(page) if r["title"] == title)
+    if not before:
         log.info("목록에 없다: %s", title)
         return False
 
-    row.scroll_into_view_if_needed()
-    page.wait_for_timeout(400)
-    row.hover()
-    page.wait_for_timeout(700)
-    btn = row.locator("button")
-    if not btn.count():
-        log.info("⋯ 버튼이 없다(기본 이력서일 수 있다): %s", title)
+    if not _open_row_menu(page, title):
         return False
-
-    btn.first.click(force=True)
-    page.wait_for_timeout(1200)
 
     item = page.locator(f'text={ROW_MENU_ITEM}').first
     if not item.count():
@@ -1069,9 +1296,10 @@ def delete_resume(page, title: str) -> bool:
 
     page.reload()
     page.wait_for_timeout(3500)
-    gone = page.locator(f'{ROW}:has(span:text-is("{title}"))').count() == 0
+    after = sum(1 for r in list_resumes_on(page) if r["title"] == title)
+    gone = after < before
     if not gone:
-        log.warning("삭제되지 않았다: %s", title)
+        log.warning("삭제되지 않았다: %s (%d건 그대로)", title, after)
     return gone
 
 
@@ -1161,3 +1389,38 @@ def _age_days(stamp: str, today) -> int:
         return (today - _d(2000 + y, m, d)).days
     except Exception:  # noqa: BLE001
         return 0
+
+
+def fill_report(result: dict[str, Any]) -> dict[str, Any]:
+    """채우기 결과를 조회 가능한 형태로 압축한다.
+
+    실패가 로그 문자열로만 남으면 사후에 못 쓴다 — "왜 71%에서 멈췄나"를
+    답하려면 어느 섹션이 어떻게 실패했는지가 데이터로 있어야 한다.
+
+    구분이 중요하다:
+      filled   넣었다고 보고된 것
+      lost     넣었는데 새로고침 후 사라진 것  ← 저장이 안 된 것
+      missing  칸 자체가 없던 것
+    이 셋을 뭉개면 "입력 실패"와 "저장 실패"를 구분할 수 없고, 둘은 원인이 다르다.
+    """
+    dates = result.get("dates") or {}
+    return {
+        "sections": {
+            "text": [k for k in result.get("filled", {}) if k in ("summary", "ai_usage")],
+            "experience": [k for k in result.get("filled", {}) if k.startswith("exp")],
+            "education": [k for k in result.get("filled", {}) if k.startswith("edu")],
+            "achievements": result.get("filled", {}).get("achievements"),
+            "skills": len(result.get("skills") or []),
+            "links": len(result.get("links") or []),
+            "languages": len(result.get("languages") or []),
+        },
+        "dates_ok": sum(1 for v in dates.values() if v),
+        "dates_total": len(dates),
+        "lost": result.get("lost") or [],
+        "missing": result.get("missing") or [],
+        "skills_skipped": result.get("skills_skipped") or [],
+        "audit_missing": (result.get("audit") or {}).get("missing") or [],
+        "platform_todo": (result.get("audit") or {}).get("platform_todo") or [],
+        "finalized": result.get("finalized"),
+        "completeness": (result.get("audit") or {}).get("completeness"),
+    }

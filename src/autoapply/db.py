@@ -321,6 +321,11 @@ def now() -> str:
 # 스키마가 안 바뀐다. 도구를 들이는 비용이 얻는 것보다 크다.
 MIGRATIONS: dict[str, dict[str, str]] = {
     "resume_builds": {
+        # 섹션별 채우기 결과(JSON)와 플랫폼이 표시한 완성도.
+        # 실패가 로그 문자열로만 남으면 사후에 못 쓴다 — "왜 71%에서 멈췄나"를
+        # 답하려면 어느 섹션이 어떻게 실패했는지가 데이터로 있어야 한다.
+        "fill_report": "TEXT",
+        "completeness": "INTEGER",
         "resume_title": "TEXT",
         "resume_url": "TEXT",
         "track": "TEXT",
