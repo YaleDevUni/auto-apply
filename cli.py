@@ -80,7 +80,11 @@ def main() -> int:
     cq.add_argument("--limit", type=int, default=1)
     cq.add_argument("--list", action="store_true", help="할 일만 보고 실행하지 않는다")
 
-    sub.add_parser("resumes", help="플랫폼에 저장된 이력서 목록 (읽기 전용)")
+    rsp = sub.add_parser("resumes", help="플랫폼 이력서 목록 / 정리")
+    rsp.add_argument(
+        "--cleanup", action="store_true",
+        help="기준을 넘은 이력서를 실제로 지운다. 기본은 무엇이 지워질지만 보여준다",
+    )
 
     sub.add_parser("browser-login", help="로그인용 창을 띄운다 (사람이 직접 로그인)")
 
@@ -203,11 +207,14 @@ def main() -> int:
         conn = _c()
         preview = get_setting(conn, "preview_resume_url", "")
         conn.close()
-        _out({
-            "미리보기용": preview or "미지정",
-            "주의": "삭제는 직접 하세요 — 계정 데이터를 지우는 건 되돌릴 수 없습니다",
-            "목록": resume_editor.list_resumes(),
-        })
+        if args.cleanup:
+            _out(resume_editor.cleanup(dry_run=False))
+        else:
+            _out({
+                "미리보기용": preview or "미지정",
+                "정리 예정": resume_editor.cleanup(dry_run=True),
+                "안내": "실제로 지우려면 --cleanup. 로컬 사본(profile/generated)은 남습니다",
+            })
     elif args.cmd == "browser-login":
         from src.autoapply.runner import login
 

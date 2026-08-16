@@ -1018,3 +1018,146 @@ def list_resumes(*, headless: bool = False) -> list[dict[str, str]]:
         date = lines[i + 1] if i + 1 < len(lines) else ""
         out.append({"title": title, "status": line, "modified": date})
     return out
+
+
+# 목록의 이력서 행. 클래스가 해시가 아니라 의미 있는 접두사라 잡을 수 있다.
+ROW = 'div[class*="ResumeItem_ResumeItem__"]'
+ROW_MENU_ITEM = "이력서 삭제"
+
+
+def delete_resume(page, title: str) -> bool:
+    """목록에서 이력서 하나를 지운다. 되돌릴 수 없다.
+
+    행에 호버하면 ⋯ 버튼이 나오고, 누르면 '미리보기 / AI 이력서 리뷰 /
+    메모 설정 / 이력서 삭제' 메뉴가 열린다. 기본 이력서에는 삭제가 없다.
+
+    호출부가 **무엇을 지울지 먼저 판단해야 한다.** 이 함수는 판단하지 않는다 —
+    제출에 쓰인 이력서를 지우면 그 기록이 사라진다.
+    """
+    row = page.locator(f'{ROW}:has(span:text-is("{title}"))').first
+    if not row.count():
+        log.info("목록에 없다: %s", title)
+        return False
+
+    row.scroll_into_view_if_needed()
+    page.wait_for_timeout(400)
+    row.hover()
+    page.wait_for_timeout(700)
+    btn = row.locator("button")
+    if not btn.count():
+        log.info("⋯ 버튼이 없다(기본 이력서일 수 있다): %s", title)
+        return False
+
+    btn.first.click(force=True)
+    page.wait_for_timeout(1200)
+
+    item = page.locator(f'text={ROW_MENU_ITEM}').first
+    if not item.count():
+        log.info("삭제 메뉴가 없다: %s", title)
+        page.keyboard.press("Escape")
+        return False
+    item.click(force=True)
+    page.wait_for_timeout(1500)
+
+    # 확인 모달이 뜨면 승인한다. 이 함수를 부른 시점에 이미 결정된 일이다.
+    for label in ("삭제", "확인"):
+        ok = page.locator(f'[role=dialog] button:has-text("{label}")')
+        if ok.count():
+            ok.first.click(force=True)
+            page.wait_for_timeout(1500)
+            break
+
+    page.reload()
+    page.wait_for_timeout(3500)
+    gone = page.locator(f'{ROW}:has(span:text-is("{title}"))').count() == 0
+    if not gone:
+        log.warning("삭제되지 않았다: %s", title)
+    return gone
+
+
+def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
+    """오래되거나 넘치는 이력서를 플랫폼에서 지운다.
+
+    **웹에서만 지우고 로컬 사본은 남긴다.** `profile/generated/`의 JSON·MD가
+    "무엇을 보냈는지"의 기록이므로, 플랫폼 목록은 작업 공간으로만 본다.
+
+    지우지 않는 것:
+      - 기본 이력서 (삭제 버튼 자체가 없다)
+      - config의 `resumes.protect`에 적힌 제목
+      - 제출에 쓰였는데 **로컬 사본이 없는** 것 — 그건 유일한 기록이다
+
+    dry_run이 기본값이다. 되돌릴 수 없는 동작이라 무엇이 지워질지 먼저 보여준다.
+    """
+    from datetime import date
+
+    from ..assemble import submitted_titles
+    from ..config import effective_config
+    from ..paths import RESUME_OUT_DIR
+
+    cfg = effective_config().get("resumes", {})
+    keep_n = int(cfg.get("max_keep", 12))
+    max_age = int(cfg.get("max_age_days", 14))
+    protect = set(cfg.get("protect") or [])
+    submitted = submitted_titles()
+    local = {p.stem.split("-", 1)[-1] for p in RESUME_OUT_DIR.glob("*.json")}
+
+    with browser(headless=headless) as s:
+        s.goto(_sel("url", CV_URL))
+        page = s.page()
+        page.wait_for_timeout(5500)
+        items = list_resumes_on(page)
+
+        candidates = []
+        for i, it in enumerate(items):
+            title = it["title"]
+            if title in protect or it.get("is_default"):
+                continue
+            # 제출에 쓰인 것은 로컬 사본이 있을 때만 지운다
+            if title in submitted and not local:
+                continue
+            too_old = _age_days(it.get("modified", ""), date.today()) > max_age
+            over_cap = i >= keep_n
+            if too_old or over_cap:
+                candidates.append({
+                    "title": title,
+                    "reason": "오래됨" if too_old else "개수 초과",
+                    "submitted": title in submitted,
+                })
+
+        if dry_run:
+            return {"dry_run": True, "total": len(items), "would_delete": candidates}
+
+        deleted = [c["title"] for c in candidates if delete_resume(page, c["title"])]
+        return {"dry_run": False, "total": len(items), "deleted": deleted,
+                "failed": [c["title"] for c in candidates if c["title"] not in deleted]}
+
+
+def list_resumes_on(page) -> list[dict[str, str]]:
+    """열려 있는 목록 페이지에서 이력서를 읽는다(브라우저를 새로 띄우지 않는다)."""
+    body = page.inner_text("body")
+    idx = body.find("내 이력서 리스트")
+    lines = [x.strip() for x in body[idx:].splitlines() if x.strip()] if idx >= 0 else []
+    out: list[dict[str, str]] = []
+    for i, line in enumerate(lines):
+        if not STATUS.fullmatch(line):
+            continue
+        window = lines[max(0, i - 3):i]
+        title = next((x for x in reversed(window) if not STATUS.fullmatch(x) and x not in BADGES), "")
+        out.append({
+            "title": title,
+            "status": line,
+            "modified": lines[i + 1] if i + 1 < len(lines) else "",
+            "is_default": any(x in BADGES for x in window),
+        })
+    return out
+
+
+def _age_days(stamp: str, today) -> int:
+    """'26.08.16' 형식의 수정일을 오늘과의 차이(일)로 바꾼다. 못 읽으면 0."""
+    try:
+        y, m, d = (int(x) for x in stamp.split("."))
+        from datetime import date as _d
+
+        return (today - _d(2000 + y, m, d)).days
+    except Exception:  # noqa: BLE001
+        return 0

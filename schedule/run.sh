@@ -59,6 +59,13 @@ else
   echo "--- A2: 건너뜀 (마지막 준비 이후 6시간 미만) ---"
 fi
 
+# ── 쌓인 이력서 정리. 하루 한 번이면 충분하다.
+if due cleanup 24; then
+  echo "--- 이력서 정리 ---"
+  "$PY" cli.py resumes --cleanup || echo "정리 실패 (다음 사이클)"
+  mark cleanup
+fi
+
 # ── B: 개선 오케스트레이터. 한 사이클에 1건만 — 브랜치가 쌓이면 검토가 불가능해진다.
 echo "--- B: 자기개선 ---"
 "$PY" cli.py improve --limit 1 || echo "improve 실패 (다음 사이클이 이어받는다)"

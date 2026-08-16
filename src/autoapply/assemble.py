@@ -711,3 +711,19 @@ def registration(job_id: int, conn: sqlite3.Connection | None = None) -> dict[st
     finally:
         if own:
             conn.close()
+
+
+def submitted_titles(conn: sqlite3.Connection | None = None) -> set[str]:
+    """제출에 쓰인 이력서 제목. 지우기 전에 로컬 사본이 있는지 확인하는 데 쓴다."""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        rows = conn.execute(
+            """SELECT b.resume_title FROM resume_builds b
+               JOIN apply_ledger l ON l.job_id = b.job_id
+               WHERE l.status='submitted' AND b.resume_title IS NOT NULL"""
+        ).fetchall()
+        return {r["resume_title"] for r in rows if r["resume_title"]}
+    finally:
+        if own:
+            conn.close()
