@@ -128,7 +128,7 @@ def _dismiss(page) -> None:
     page.wait_for_timeout(300)
 
 
-def _flush(page, field: str, value: Any) -> None:
+def _flush(page, field: str, value: Any, *, nth: int = 0) -> None:
     """같은 항목의 텍스트 칸을 다시 건드려 저장을 깨운다.
 
     실측(2026-08-16): 학력 종료일을 피커로 바꾸면 화면에는 반영되는데
@@ -142,7 +142,7 @@ def _flush(page, field: str, value: Any) -> None:
     if not value or field not in FIELDS:
         return
     try:
-        _set(page, FIELDS[field], str(value))
+        _set(page, f"{FIELDS[field]} >> nth={nth}", str(value))
     except Exception as e:  # noqa: BLE001
         log.warning("저장 유발 실패 (%s): %s", field, e)
 
@@ -536,22 +536,30 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
 
 # YYYY.MM 버튼의 화면상 순서. 편집기 레이아웃이 고정이라 순번으로 잡는다.
 # (섹션 제목이 h2/h3가 아니어서 DOM으로 소속을 찾을 수 없다)
-def _date_slots(n_achievements: int) -> dict[str, int]:
-    """날짜 버튼 순서. 성과가 늘면 뒤가 밀린다.
+def _date_slots(n_achievements: int, n_educations: int = 1) -> dict[str, int]:
+    """날짜 버튼 순서. 앞 섹션이 늘면 뒤가 그만큼 밀린다.
 
-        0,1              경력 재직기간
-        2..2+2n-1        성과 기간 (성과 1건당 2개)
-        그 다음 2개       학력 재학기간
+        0,1                      경력 재직기간
+        2 .. 2+2a-1              성과 기간   (성과 1건당 2개)
+        2+2a .. 2+2a+2e-1        학력 재학기간 (학력 1건당 2개)
+        그 뒤                     수상·어학 등
 
-    성과를 여러 건 채운 뒤 학력 슬롯을 고정 인덱스(4,5)로 잡으면 두 번째 성과
-    기간 칸에 졸업일이 들어간다.
+    고정 인덱스로 잡으면 값이 엉뚱한 칸에 들어간다. 실제로 학력을 4,5로 박아뒀다가
+    두 번째 성과 기간 칸에 졸업일이 들어갔고, 학력 2건일 때는 두 번째 학력 기간이
+    통째로 비었다(비전 점검이 잡았다).
     """
-    n = max(n_achievements, 1)
-    base = 2 + 2 * n
-    slots = {"exp_start": 0, "exp_end": 1, "edu_start": base, "edu_end": base + 1}
-    for i in range(n):
+    a = max(n_achievements, 1)
+    e = max(n_educations, 1)
+    slots = {"exp_start": 0, "exp_end": 1}
+    for i in range(a):
         slots[f"ach{i}_start"] = 2 + 2 * i
         slots[f"ach{i}_end"] = 3 + 2 * i
+    base = 2 + 2 * a
+    for j in range(e):
+        slots[f"edu{j}_start"] = base + 2 * j
+        slots[f"edu{j}_end"] = base + 2 * j + 1
+    # 이전 이름과의 호환 (학력 1건 기준)
+    slots["edu_start"], slots["edu_end"] = slots["edu0_start"], slots["edu0_end"]
     return slots
 
 
@@ -783,7 +791,7 @@ def fill(
         if "dates" in steps:
             achs = [a for a in ((exps[0].get("achievements") if exps else []) or [])
                     if a.get("title")][:4]
-            slots = _date_slots(len(achs))
+            slots = _date_slots(len(achs), len(edus))
             if exps:
                 e0 = exps[0]
                 if e0.get("start"):
@@ -795,13 +803,14 @@ def fill(
                         dates[f"ach{i}_start"] = _set_date(p, slots[f"ach{i}_start"], a["start"])
                     if a.get("end"):
                         dates[f"ach{i}_end"] = _set_date(p, slots[f"ach{i}_end"], a["end"])
-            if edus:
-                d0 = edus[0]
-                if d0.get("start"):
-                    dates["edu_start"] = _set_date(p, slots["edu_start"], d0["start"])
-                if d0.get("end"):
-                    dates["edu_end"] = _set_date(p, slots["edu_end"], d0["end"])
-                _flush(p, "edu_detail", d0.get("detail"))
+            for j, ed in enumerate(edus):
+                if ed.get("start"):
+                    dates[f"edu{j}_start"] = _set_date(p, slots[f"edu{j}_start"], ed["start"])
+                if ed.get("end"):
+                    dates[f"edu{j}_end"] = _set_date(p, slots[f"edu{j}_end"], ed["end"])
+                # 날짜 피커는 저장을 트리거하지 않는다. 같은 항목의 텍스트 칸을
+                # 건드려야 PATCH가 나간다.
+                _flush(p, "edu_detail", ed.get("detail"), nth=j)
 
         # 필수 셀렉트. 비면 완성도가 안 올라가고 지원 시 반려될 수 있다.
         selects: dict[str, bool] = {}
