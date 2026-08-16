@@ -264,7 +264,7 @@ src/autoapply/
   llm.py                 claude CLI 호출. 하네스를 걷어내 입력 2토큰
   assemble.py            이력서 조립: 작성 → 검수 → 보강 (+ 수정요청 반영)
   vision.py              스크린샷 판독. 플랫폼을 몰라도 되는 검증 층
-  render.py              조립 결과 미리보기 이미지. to_pdf는 현재 미사용(주석 참조)
+  render.py              MD→PDF 변환기. 사람인·자소설 업로드형 지원용, 현재 미사용(주석 참조)
   orchestrator.py        자기개선. 브랜치에서만 움직인다
   adapters/              wanted · saramin · jasoseol
   notify/                telegram — 알림 · 사진 · 폰 명령 수신

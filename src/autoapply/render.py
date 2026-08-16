@@ -136,13 +136,17 @@ def to_html(md: str, *, title: str = "이력서") -> str:
     )
 
 
-# --- 아래 두 함수는 현재 쓰이지 않는다 (2026-08-16) --------------------------
+# --- 아래 두 함수(to_pdf, render_latest)는 현재 쓰이지 않는다 (2026-08-16) ---
 # PDF 업로드로 이력서를 등록하는 경로를 노렸으나, 원티드 파일 선택은 OS 대화상자를
 # 띄워서 자동화가 닿지 않는다. 대신 '사본 만들기'로 완성된 이력서를 복제하는
 # 경로를 쓴다(config.yaml의 resumes.copy_from).
 #
 # 지우지 않고 남기는 이유: 사람인·자소설은 업로드형 지원이 흔하고, 그때 이
-# 변환기가 그대로 필요하다. 위의 to_html/CSS는 preview_image가 계속 쓴다.
+# 변환기가 그대로 필요하다(config.yaml — saramin/jasoseol 어댑터는 검증만 되고
+# 레시피는 아직 없음). json_to_markdown/preview_image는 조립 결과를 로컬에서
+# 그려 미리보기로 보내던 용도였는데, cli.py가 실제 원티드 편집기 화면 스크린샷을
+# 쓰도록 바뀌며(커밋 "지원 준비 알림 사진을 실제 원티드 화면으로 바꾼다") 마지막
+# 호출부를 잃어 완전히 죽은 코드가 됐다 — 그래서 이 둘은 제거했다.
 def to_pdf(md_path: Path | str, pdf_path: Path | str | None = None) -> Path:
     """MD를 A4 PDF로 굽는다. Chromium이 이미 있으므로 추가 설치가 없다."""
     from playwright.sync_api import sync_playwright
@@ -177,73 +181,3 @@ def render_latest(job_id: int) -> Path:
     if not matches:
         raise FileNotFoundError(f"공고 {job_id}의 조립된 이력서가 없다 — cli.py resume {job_id}")
     return to_pdf(matches[-1])
-
-
-def json_to_markdown(data: dict) -> str:
-    """조립 JSON을 사람이 읽는 이력서 형태로 편다. 미리보기용.
-
-    편집기 화면 대신 이걸 보여주는 이유: 미리보기는 임시 이력서 하나를 재사용해
-    채우는데, **실제 제출은 그 공고용으로 새로 만든다.** 즉 화면 사진은 제출될
-    물건이 아니다. 조립 결과를 직접 그리면 사람이 보는 것과 나가는 것이 같아진다.
-    """
-    out: list[str] = ["박예일"]
-    if data.get("headline"):
-        out += ["", data["headline"]]
-    if data.get("summary"):
-        out += ["", "간단 소개", "", data["summary"]]
-
-    exps = data.get("experiences") or []
-    if exps:
-        out += ["", "경력"]
-        for e in exps:
-            out += ["", f"  {e.get('company', '')}",
-                    f"  {e.get('start', '')} - {e.get('end', '')} · "
-                    f"{e.get('job_role', '')} {e.get('business_title', '')}".rstrip()]
-            for a in e.get("achievements") or []:
-                out += ["", f"  {a.get('title', '')}  {a.get('start', '')} - {a.get('end', '')}"]
-                out += [ln for ln in (a.get("detail") or "").splitlines() if ln.strip()]
-
-    edus = data.get("educations") or []
-    if edus:
-        out += ["", "학력"]
-        for e in edus:
-            out += ["", f"  {e.get('school', '')}",
-                    f"  {e.get('start', '')} - {e.get('end', '')} · {e.get('major', '')}"]
-            if e.get("detail"):
-                out += [f"· {e['detail']}"]
-
-    if data.get("ai_usage"):
-        out += ["", "AI 활용", "", f"· {data['ai_usage']}"]
-    if data.get("skills"):
-        out += ["", "스킬", "", ", ".join(data["skills"])]
-    if data.get("languages"):
-        out += ["", "외국어", "",
-                ", ".join(f"{l.get('name')} {l.get('level')}" for l in data["languages"])]
-    if data.get("links"):
-        out += ["", "링크", ""]
-        out += [f"{l.get('name')}: {l.get('url')}" for l in data["links"]]
-    return "\n".join(out)
-
-
-def preview_image(data: dict, out_path: Path | str) -> Path:
-    """조립 결과를 이미지 한 장으로 만든다. 폰으로 보내 사람이 판단한다."""
-    from playwright.sync_api import sync_playwright
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    html = to_html(json_to_markdown(data), title="이력서 미리보기")
-    tmp = out_path.with_suffix(".html")
-    tmp.write_text(html, encoding="utf-8")
-    try:
-        with sync_playwright() as p:
-            b = p.chromium.launch(headless=True)
-            try:
-                page = b.new_page(viewport={"width": 794, "height": 1123})
-                page.goto(tmp.as_uri(), wait_until="load")
-                page.wait_for_timeout(300)
-                page.screenshot(path=str(out_path), full_page=True)
-            finally:
-                b.close()
-    finally:
-        tmp.unlink(missing_ok=True)
-    return out_path
