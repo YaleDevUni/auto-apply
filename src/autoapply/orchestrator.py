@@ -75,7 +75,7 @@ from typing import Any
 
 from .config import effective_config
 from .db import connect, now
-from .llm import UsageLimited, _raise_if_limited
+from .llm import UsageLimited, raise_if_limited_failure
 from .notify import telegram
 from .paths import CODE_ROOT
 
@@ -443,8 +443,20 @@ def _agent(task: str, *, role: str, system: str, tools: str) -> str:
         timeout=cfg["timeout"], check=False, env=env,
     )
     out = (p.stdout or "") + (p.stderr or "")
-    # 한도는 고장이 아니다. 여기서 구분해야 큐로 되돌릴 수 있다.
-    _raise_if_limited(out)
+    # exit 코드를 안 보면 **실패한 실행의 출력이 그대로 계획이 된다.** 실측:
+    # 월 지출 한도에 걸린 claude가 exit 1 + 한 줄 안내문만 내는데, 그것이
+    # `_parse_plan`을 지나 "계획을 읽지 못했습니다"라는 high 계획 #4로 저장되고
+    # 승인 대기에 올라 파이프라인을 붙잡았다(fix hold까지 걸린 채로).
+    #
+    # 한도는 고장이 아니다 — 여기서 갈라야 `plan()`이 자리를 큐에 돌려놓고
+    # 다음 기회에 다시 한다. 판정은 llm 쪽과 같은 함수를 쓴다.
+    if p.returncode != 0:
+        message = raise_if_limited_failure(p.stdout or "", p.stderr or "")
+        raise RuntimeError(f"{role} 에이전트 실패 (exit {p.returncode}): {message}")
+    # 성공 출력은 더 이상 한도로 안 본다. 여기 오는 것은 코딩 에이전트의 출력
+    # 전문이라 "rate limit", "사용 한도"를 **논의하는 계획문**이 그대로 걸린다
+    # (재현 확인). 그러면 멀쩡한 계획이 한도로 오인돼 통째로 버려진다. 한도는
+    # exit≠0으로 오므로(실측) 위 분기가 전부 잡는다.
     return out.strip()
 
 
