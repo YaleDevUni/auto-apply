@@ -15,7 +15,7 @@ rm -f "$HOME/Library/LaunchAgents/com.autoapply.cycle.plist"
 
 for LABEL in com.autoapply.night com.autoapply.flush com.autoapply.listen; do
   DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
-  sed "s|__REPO__|$REPO|g" "$REPO/schedule/$LABEL.plist" > "$DEST"
+  sed -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" "$REPO/schedule/$LABEL.plist" > "$DEST"
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$UID" "$DEST"
   echo "등록됨: $LABEL"
