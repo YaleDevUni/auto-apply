@@ -151,11 +151,18 @@ def resident_owner() -> tuple[str, int, str]:
     같은 말이기도 하다.
     """
     want = str(BROWSER_DIR)
+    others: tuple[int, str] | None = None
+    # 포트 하나에 여러 pid가 걸릴 수 있다(자식 프로세스가 소켓을 물려받는 등).
+    # **하나라도 우리 것이면 우리 창이다** — 첫 pid만 보고 판정하면 순서에
+    # 따라 우리 창을 남의 것으로 오판한다.
     for pid in _resident_pids():
         cmd = _cmdline(pid)
         if f"--user-data-dir={want}" in cmd or f'--user-data-dir="{want}"' in cmd:
             return "ours", pid, cmd
-        return "foreign", pid, cmd
+        if others is None:
+            others = (pid, cmd)
+    if others is not None:
+        return "foreign", others[0], others[1]
     return "none", 0, ""
 
 
