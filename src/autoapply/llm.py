@@ -57,14 +57,23 @@ class UsageLimited(RuntimeError):
     """
 
 
-# claude CLI가 한도에 걸렸을 때 내는 문구들
+# 한도에 걸렸을 때 나오는 문구. **성공 응답에는 절대 없는 것만** 넣는다.
+#
+# 처음엔 "429"도 넣었다가 성공 응답을 한도로 오판했다 — 응답 JSON의 토큰 수나
+# 소요시간 숫자에 그 문자열이 우연히 섞인다("duration_api_ms":31656 같은 곳).
+# 그대로 뒀으면 오케스트레이터가 멀쩡한 작업을 영원히 큐로 되돌렸을 것이다.
 _LIMIT_MARKERS = (
-    "usage limit", "rate limit", "429",
-    "사용 한도", "한도에 도달", "limit reached", "quota",
+    "usage limit",
+    "rate limit",
+    "limit reached",
+    "too many requests",
+    "사용 한도",
+    "한도에 도달",
 )
 
 
 def _raise_if_limited(text: str) -> None:
+    """실패한 호출에서만 부른다. 성공 응답 본문을 훑으면 오탐이 난다."""
     low = text.lower()
     if any(m.lower() in low for m in _LIMIT_MARKERS):
         raise UsageLimited(text.strip()[:300])
@@ -144,10 +153,11 @@ def ask(
             "config.yaml의 llm.timeout_sec를 늘리거나 더 빠른 모델을 쓰세요."
         ) from exc
 
-    combined = (proc.stdout or "") + (proc.stderr or "")
-    _raise_if_limited(combined)  # 한도는 고장이 아니다. 별도로 다룬다.
-
+    # 한도 판정은 **실패했을 때만** 한다. 성공 응답 본문에는 토큰 수·소요시간이
+    # 들어 있어 무엇을 찾든 우연히 걸릴 수 있다.
     if proc.returncode != 0:
+        combined = (proc.stdout or "") + (proc.stderr or "")
+        _raise_if_limited(combined)  # 한도는 고장이 아니다. 별도로 다룬다.
         raise RuntimeError(
             f"claude 실행 실패 (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}"
         )
@@ -159,6 +169,7 @@ def ask(
 
     if isinstance(payload, dict):
         if payload.get("is_error"):
+            _raise_if_limited(str(payload.get("result", "")))
             raise RuntimeError(f"claude 오류: {str(payload.get('result'))[:500]}")
         _log_cost(payload)
         return str(payload.get("result", "")).strip()

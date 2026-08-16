@@ -38,6 +38,18 @@ def _set(page, selector: str, value: str) -> None:
     """
     _dismiss(page)
     loc = page.locator(selector).first
+
+    # 필드마다 maxlength가 다르다. 넘겨서 넣으면 브라우저가 **조용히 자른다.**
+    # 실측: 'AI 활용 경험'은 50자 제한인데 365자를 넣어 49자만 저장됐고,
+    # 화면에도 잘린 채로 보였다. 넣기 전에 재고, 잘릴 것이면 알린다.
+    limit = loc.evaluate("el => el.maxLength")
+    if isinstance(limit, int) and 0 < limit < len(value):
+        log.warning(
+            "필드가 %d자 제한인데 %d자를 넣으려 한다 — 잘라서 넣는다 (%s)",
+            limit, len(value), selector,
+        )
+        value = value[:limit]
+
     loc.click()
     loc.fill(value)
     loc.press("Tab")
@@ -199,7 +211,7 @@ def _set_date(page, nth: int, value: str) -> bool:
     return True
 
 
-def _set_select(page, placeholder: str, value: str) -> bool:
+def _set_select(page, placeholder: str, value: str, *, exact: bool = True) -> bool:
     """원티드 커스텀 셀렉트(재직 형태·졸업 상태)를 고른다.
 
     <select>가 아니라 div[data-role=select-render-wrapper]다. 값이 안 정해진
@@ -217,7 +229,12 @@ def _set_select(page, placeholder: str, value: str) -> bool:
 
     # 옵션 텍스트는 span 안에 있고 그 span은 클릭을 안 받는다.
     # 실제로 눌러야 하는 건 li/[role=option] 쪽이다.
-    for sel in (f'[role=option]:has-text("{value}")', f'li:has-text("{value}")'):
+    patterns = (
+        (f'[role=option]:has-text("{value}")', f'li:has-text("{value}")')
+        if not exact
+        else (f'[role=option]:has-text("{value}")', f'li:has-text("{value}")')
+    )
+    for sel in patterns:
         opt = page.locator(sel)
         if opt.count():
             opt.first.click(force=True)
@@ -297,6 +314,63 @@ def _fill_achievements(page, achievements: list[dict], limit: int = 4) -> int:
             _set(page, f"{ACH_DETAIL} >> nth={i}", str(ach["detail"]))
         filled += 1
     return filled
+
+
+# 행에 호버하면 나타나는 '추가' 아이콘. 목록에 보이는 버튼으로는 못 찾는다.
+ROW_ADD = 'button[wds-component="icon-button"][data-variant="solid"]'
+
+
+def _add_rows(page, row_input: str, want: int, limit: int = 4) -> int:
+    """경력·학력처럼 '추가' 버튼이 안 보이는 섹션의 칸을 늘린다.
+
+    실측: 화면에 '학력 추가' 버튼이 없어 다건 입력이 막혀 있었다. 진입점은
+    **행에 마우스를 올리면 나타나는 아이콘 버튼**이고, 그것도 행 안쪽으로
+    범위를 좁혀야 한다 — 페이지 전체로 잡으면 14개가 걸린다.
+
+    반환: 최종 칸 수. 채울 내용이 있는 만큼만 만든다 — 빈 칸이 남으면
+    이력서가 지저분해지고, 필수 표시(*)가 붙어 완성도도 깎인다.
+    """
+    for _ in range(min(want, limit)):
+        have = page.locator(row_input).count()
+        if have >= min(want, limit):
+            break
+        row = page.locator(f'xpath=//input[@placeholder="{row_input.split(chr(34))[1]}"]/ancestor::li[1]').last
+        if not row.count():
+            break
+        _dismiss(page)
+        row.scroll_into_view_if_needed()
+        page.wait_for_timeout(500)
+        row.hover()
+        page.wait_for_timeout(1200)
+        btn = row.locator(ROW_ADD)
+        if not btn.count():
+            log.info("행 추가 버튼을 못 찾음: %s", row_input)
+            break
+        btn.first.click(force=True)
+        page.wait_for_timeout(2000)
+        if page.locator(row_input).count() <= have:
+            log.info("행이 늘지 않았다 — 중단: %s", row_input)
+            break
+    return page.locator(row_input).count()
+
+
+def _fill_languages(page, languages: list[dict], limit: int = 3) -> list[str]:
+    """언어와 수준을 고른다. 둘 다 커스텀 셀렉트다.
+
+    수준 옵션은 이름 뒤에 설명이 줄바꿈으로 붙는다("고급 비즈니스 레벨\n해당 …").
+    그래서 `:text-is()`가 아니라 `:has-text()`로 잡아야 한다 — 완전일치를 쓰면
+    아무것도 안 걸리고 조용히 비워둔 채 지나간다.
+    """
+    done: list[str] = []
+    for lang in (languages or [])[:limit]:
+        name, level = (lang.get("name") or "").strip(), (lang.get("level") or "").strip()
+        if not (name and level):
+            continue
+        if not _set_select(page, "언어", name, exact=False):
+            continue
+        if _set_select(page, "수준", level, exact=False):
+            done.append(f"{name} {level}")
+    return done
 
 
 def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], list[str]]:
@@ -621,16 +695,19 @@ def fill(
         # 학력 — 같은 원칙
         edus = data.get("educations") or []
         if "education" in steps and edus and found.get("edu_school"):
-            ed = edus[0]
-            for key, src in (
-                ("edu_school", "school"),
-                ("edu_major", "major"),
-                ("edu_detail", "detail"),
-            ):
-                if ed.get(src) and found.get(key):
+            slots = _add_rows(p, FIELDS["edu_school"], len(edus))
+            for n, ed in enumerate(edus[:slots]):
+                for key, src in (
+                    ("edu_school", "school"),
+                    ("edu_major", "major"),
+                    ("edu_detail", "detail"),
+                ):
+                    if not (ed.get(src) and found.get(key)):
+                        continue
+                    sel = f"{FIELDS[key]} >> nth={n}"
                     setter = _set_autocomplete if key in AUTOCOMPLETE else _set
-                    setter(p, FIELDS[key], str(ed[src]))
-                    filled[key] = str(ed[src])[:40]
+                    setter(p, sel, str(ed[src]))
+                    filled[f"{key}{n}"] = str(ed[src])[:40]
 
         # 날짜 — 버튼+피커라 입력 필드와 처리가 다르다. 뒤에 몰아서 한다
         # (피커가 열려 있으면 다른 필드 클릭이 가려진다).
@@ -669,6 +746,7 @@ def fill(
             _fill_skills(p, data.get("skills") or []) if "skills" in steps else ([], [])
         )
         links = _fill_links(p, data.get("links") or []) if "links" in steps else []
+        langs = _fill_languages(p, data.get("languages") or []) if "links" in steps else []
 
         p.wait_for_timeout(3000)  # 자동 저장이 붙을 시간
 
@@ -690,7 +768,8 @@ def fill(
             "url": url, "title": title, "dry_run": False,
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
-            "dates": dates, "selects": selects, "finalized": finalized, "skills": skills, "skills_skipped": skills_skipped, "links": links,
+            "dates": dates, "selects": selects, "finalized": finalized, "skills": skills, "skills_skipped": skills_skipped,
+            "links": links, "languages": langs,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
         }

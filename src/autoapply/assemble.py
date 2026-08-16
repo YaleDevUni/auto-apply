@@ -280,7 +280,9 @@ EDITOR_SCHEMA = """{
     {"school": "학교명", "major": "전공 및 학위", "start": "YYYY.MM", "end": "YYYY.MM",
      "detail": "이수 과목 또는 연구 내용"}
   ],
-  "ai_usage": "AI 활용 경험. 가이드 §6-1을 기준으로 쓰되 이 공고에 맞춰 조정",
+  "ai_usage": "AI 활용 경험 **한 줄 요약. 50자 이내(엄수).** 원티드 필드가 50자 제한이라 넘기면 잘린다. 상세 내용은 summary 불릿이나 주요 성과에 녹인다",
+  "languages": [{"name": "영어", "level": "고급 비즈니스 레벨"}],
+  "_note_language": "level은 원티드 선택지 문구를 그대로 써야 한다: 유창함 | 고급 비즈니스 레벨 | 비즈니스 레벨 | 일상 회화. 다른 표현을 쓰면 선택지를 못 찾아 비워둔 채 지나간다. 가이드에 '영어 유창'만 있으면 '고급 비즈니스 레벨'로 적는다.",
   "skills": ["스킬", "나열"],
   "links": [{"name": "GitHub", "url": "https://..."}],
   "gaps": [{"level": "필수|우대", "text": "공고 요건 중 근거가 없는 항목"}]
@@ -313,6 +315,14 @@ def build_editor_json(
 가이드의 §1 처리 순서, §3 사실 저장소, §4 문장 규칙, §5 일관성 체크리스트,
 §6-1 AI 활용, §7 직무별 강조 우선순위를 적용한다.
 
+**한 분야로 초점을 맞춘다.** 공고가 요구하는 핵심 역량 하나를 정하고 거기에 맞춰
+구성한다. 백엔드·DevOps·인프라·AI를 한 이력서에 고루 담으면 어느 것도 강해 보이지
+않는다. §7 우선순위표의 1순위를 축으로 삼고, 2·3순위는 보조로만 쓴다.
+
+**사고 과정을 출력하지 않는다.** "공고는 ~이므로 §7 조합으로 구성했다" 같은 문장은
+이력서 내용이 아니다. 실측에서 그런 문장이 간단 소개 맨 앞에 그대로 들어갔다.
+어느 필드에도 판단 근거·구성 의도를 적지 않는다.
+
 **문장 규칙(§4)은 모든 필드에 예외 없이 적용한다.** 특히:
 - 명사형 종결로 통일한다. `~했습니다 / ~있습니다` 를 쓰지 않는다.
   ✅ `동시 충돌 리포트 월 10건 → 0건으로 감소`
@@ -337,7 +347,10 @@ def build_editor_json(
 
     raw = llm.ask(prompt)
     data = _parse_json(raw)
+    _strip_reasoning(data)
+    _clamp_fields(data)
     _ensure_summary_length(data, job, guide)
+    _strip_reasoning(data)  # 보강 응답에도 섞일 수 있다
 
     gaps = data.get("gaps") or []
     required = [g for g in gaps if g.get("level") == "필수"]
@@ -364,7 +377,70 @@ def build_editor_json(
     }
 
 
+# 모델이 이력서 내용 대신 판단 근거를 적을 때 쓰는 표현들.
+# 실측: 간단 소개 첫 문단이 "공고는 ... §7 \"풀스택/DevOps\" 조합으로 구성."이었다.
+REASONING = re.compile(
+    r"(공고는|채용공고는|이 공고)[^\n]*(구성|매칭|선택|판단|배치)[^\n]*[.。]"
+    r"|§\s*\d"
+    r"|가이드\s*§"
+    r"|(우선순위|사실 저장소)[^\n]*(따라|기준으로)[^\n]*[.。]"
+)
+
+# 원티드 편집기 필드 길이 제한. 넘기면 브라우저가 조용히 자른다.
+FIELD_LIMITS = {"ai_usage": 50}
+
 SUMMARY_MIN = 450
+
+
+def _strip_reasoning(data: dict[str, Any]) -> None:
+    """판단 근거 문장을 걷어낸다.
+
+    프롬프트로 "사고 과정을 쓰지 마라"고 해도 새어 나온다. 그게 이력서 맨 앞에
+    들어가면 읽는 사람에게 곧바로 보인다 — 프롬프트에 의존하지 않고 코드로 막는다.
+
+    문단 단위로 검사한다. 근거 문장은 보통 첫 문단에 통째로 오고, 본문 불릿에는
+    섞이지 않는다.
+    """
+    for key in ("summary", "ai_usage"):
+        text = data.get(key)
+        if not isinstance(text, str) or not text.strip():
+            continue
+        blocks = [b for b in text.split("\n\n")]
+        kept = [b for b in blocks if not (REASONING.search(b) and not b.strip().startswith("·"))]
+        if len(kept) != len(blocks):
+            log.info("%s에서 판단 근거 문단 %d개 제거", key, len(blocks) - len(kept))
+        data[key] = "\n\n".join(kept).strip()
+
+
+def _clamp_fields(data: dict[str, Any]) -> None:
+    """길이 제한이 있는 필드를 다듬는다.
+
+    'AI 활용 경험'은 50자짜리 **한 줄 요약 칸**이다. 머리말("AI 활용")과 불릿
+    기호는 그 50자를 갉아먹으므로 먼저 걷어낸다. 그래도 넘치면 단어 중간이 아니라
+    구두점·공백에서 자른다 — 편집기가 자르면 "…채용 자동화 파이"처럼 끊긴다.
+    """
+    for key, limit in FIELD_LIMITS.items():
+        text = data.get(key)
+        if not isinstance(text, str) or not text.strip():
+            continue
+
+        # 머리말 줄과 불릿 기호 제거 → 한 줄로
+        lines = [ln.strip().lstrip("·-• ").strip() for ln in text.splitlines() if ln.strip()]
+        lines = [ln for ln in lines if ln not in ("AI 활용", "AI 활용 경험")]
+        one = " ".join(lines).strip()
+
+        if len(one) > limit:
+            cut = one[:limit]
+            # 마지막 구두점이나 공백까지만 남긴다
+            for sep in (". ", ", ", " "):
+                idx = cut.rfind(sep)
+                if idx > limit * 0.5:
+                    cut = cut[:idx]
+                    break
+            one = cut.rstrip(" ,.·")
+            log.info("%s가 %d자 — %d자로 줄였다", key, len(text), len(one))
+
+        data[key] = one
 
 
 def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str) -> None:
