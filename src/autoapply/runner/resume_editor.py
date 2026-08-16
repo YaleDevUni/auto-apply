@@ -139,10 +139,10 @@ def _flush(page, field: str, value: Any, *, nth: int = 0) -> None:
     날짜 피커가 자체적으로 저장을 트리거하지 않는 구조라, 값을 바꾼 뒤 형제
     필드를 한 번 두드려주는 게 유일한 방법이다.
     """
-    if not value or field not in FIELDS:
+    if not value or field not in _fields():
         return
     try:
-        _set(page, f"{FIELDS[field]} >> nth={nth}", str(value))
+        _set(page, f"{_fields()[field]} >> nth={nth}", str(value))
     except Exception as e:  # noqa: BLE001
         log.warning("저장 유발 실패 (%s): %s", field, e)
 
@@ -155,7 +155,7 @@ def _date_buttons(page):
     들어간 원인이 이것이다. 채워진 것(2023.08)도 함께 매칭해 순서를 고정한다.
     """
     return page.locator("button").filter(
-        has_text=re.compile(r"^(YYYY\.MM|\d{4}\.\d{2})$")
+        has_text=re.compile(_sel("date_button_pattern", r"^(YYYY\.MM|\d{4}\.\d{2})$"))
     )
 
 
@@ -218,9 +218,9 @@ def _set_select(page, placeholder: str, value: str, *, exact: bool = True) -> bo
     상태에서는 안쪽 span이 placeholder 문구를 들고 있어서 그걸로 찾는다.
     """
     _dismiss(page)
-    wrap = page.locator(
-        f'[data-role="select-render-wrapper"]:has([data-role="select-placeholder"]:text-is("{placeholder}"))'
-    )
+    wrap_sel = _sel("select_wrapper", '[data-role="select-render-wrapper"]')
+    ph_sel = _sel("select_placeholder", '[data-role="select-placeholder"]')
+    wrap = page.locator(f'{wrap_sel}:has({ph_sel}:text-is("{placeholder}"))')
     if not wrap.count():
         log.info("셀렉트를 못 찾음(이미 선택됐을 수 있다): %s", placeholder)
         return False
@@ -298,7 +298,7 @@ def _fill_achievements(page, achievements: list[dict], limit: int = 4) -> int:
         return 0
 
     for _ in range(len(items) - page.locator(ACH_DETAIL).count()):
-        add = page.locator(ACH_ADD)
+        add = page.locator(_sel("achievement.add_button", ACH_ADD))
         if not add.count():
             log.info("'주요 성과 추가' 버튼이 없다 — 있는 칸까지만 채운다")
             break
@@ -342,7 +342,7 @@ def _add_rows(page, row_input: str, want: int, limit: int = 4) -> int:
         page.wait_for_timeout(500)
         row.hover()
         page.wait_for_timeout(1200)
-        btn = row.locator(ROW_ADD)
+        btn = row.locator(_sel("row_add_icon", ROW_ADD))
         if not btn.count():
             log.info("행 추가 버튼을 못 찾음: %s", row_input)
             break
@@ -384,17 +384,18 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], l
     """
     added: list[str] = []
     skipped: list[str] = []
+    skill_input = _sel("skill.input", SKILL_INPUT)
 
     # 스킬 입력칸은 상태에 따라 세 모습이다:
     #   비어 있음      → "내가 가진 직무 스킬..." 안내 문구를 눌러 연다
     #   이미 열림      → 그대로 쓴다
     #   칩만 있고 접힘 → 안내 문구가 사라져 있다. 기존 칩을 눌러 다시 연다
     # 세 번째를 빠뜨려 "입력칸을 못 찾음"으로 계속 실패했다.
-    box = page.locator(SKILL_INPUT).first
+    box = page.locator(skill_input).first
     if not box.count():
         # 칩은 클래스가 해시라 셀렉터로 못 잡는다. 넣으려는 스킬 이름으로 찾는다 —
         # 이미 등록된 것이 있으면 그게 화면에 칩으로 떠 있다.
-        openers = [page.locator(SKILL_ACTIVATOR).first]
+        openers = [page.locator(_sel("skill.activator", SKILL_ACTIVATOR)).first]
         openers += [page.locator(f'span:text-is("{sk}")').first for sk in skills[:limit]]
         for opener in openers:
             if not opener.count():
@@ -403,7 +404,7 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], l
             page.wait_for_timeout(500)
             opener.click(force=True)
             page.wait_for_timeout(1600)
-            box = page.locator(SKILL_INPUT).first
+            box = page.locator(skill_input).first
             if box.count():
                 break
 
@@ -420,7 +421,7 @@ def _fill_skills(page, skills: list[str], limit: int = 12) -> tuple[list[str], l
             page.wait_for_timeout(1600)
             # 후보는 [role=option]이 아니라 span을 품은 button으로 뜬다.
             # 정확히 일치하는 것만 고른다 — "React"를 치면 "React Native"도 같이 나온다.
-            cand = page.locator(f'button:has(span:text-is("{variant}"))')
+            cand = page.locator(_sel("skill.option", 'button:has(span:text-is("{value}"))').replace("{value}", variant))
             if cand.count():
                 chosen, opt = variant, cand
                 break
@@ -476,7 +477,7 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
                 continue
 
     if not page.locator(LINK_NAME).count():
-        act = page.locator(LINK_ACTIVATOR).last
+        act = page.locator(_sel("link.row", LINK_ACTIVATOR)).last
         if not act.count():
             log.warning("링크 행을 찾지 못했다")
             return added
@@ -518,13 +519,13 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
         # 화면 점검(audit)이 없었으면 계속 몰랐을 결함이다.
         if link is not links[:limit][-1]:
             before = page.locator(LINK_NAME).count()
-            row = page.locator(LINK_ACTIVATOR).last
+            row = page.locator(_sel("link.row", LINK_ACTIVATOR)).last
             if row.count():
                 row.scroll_into_view_if_needed()
                 page.wait_for_timeout(400)
                 row.hover()
                 page.wait_for_timeout(1000)
-                btn = row.locator(ROW_ADD)
+                btn = row.locator(_sel("row_add_icon", ROW_ADD))
                 if btn.count():
                     btn.first.click(force=True)
                     page.wait_for_timeout(1500)
@@ -568,7 +569,32 @@ AUTOCOMPLETE = ("exp_company", "edu_school", "edu_major")
 
 CV_URL = "https://www.wanted.co.kr/cv"
 
-# 실측(2026-08-16)으로 확인한 편집기 필드. placeholder는 문구가 길어 앞부분만 쓴다.
+def _editor_cfg(platform: str = "wanted") -> dict[str, Any]:
+    """레시피의 editor 섹션. 셀렉터는 데이터이므로 JSON에서 읽는다.
+
+    자가수복 에이전트가 고칠 수 있는 것은 레시피(JSON)뿐이다 — dry-run
+    스크린샷이라는 검증 오라클이 있기 때문이다. 셀렉터가 파이썬에 박혀 있으면
+    원티드가 UI를 바꿀 때 사람이 붙어야 한다.
+
+    레시피에 editor가 없으면 아래 기본값을 쓴다(구버전 레시피 호환).
+    """
+    from .apply import load_recipe
+
+    try:
+        return load_recipe(platform).get("editor") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _sel(key: str, default: str, platform: str = "wanted") -> str:
+    cfg = _editor_cfg(platform)
+    node: Any = cfg
+    for part in key.split("."):
+        node = (node or {}).get(part) if isinstance(node, dict) else None
+    return node if isinstance(node, str) and node else default
+
+
+# 기본값. 레시피의 editor 섹션이 이걸 덮는다.
 FIELDS: dict[str, str] = {
     "name": 'input[name="name"]',
     "mobile": 'input[name="mobile"]',
@@ -587,6 +613,11 @@ FIELDS: dict[str, str] = {
 
 # 계정에서 자동으로 채워지는 값. 덮어쓰지 않는다 — 원티드가 갖고 있는 게 정본이다.
 PREFILLED = ("name", "mobile", "email")
+
+
+def _fields(platform: str = "wanted") -> dict[str, str]:
+    """레시피에 정의된 필드맵. 없는 항목은 기본값으로 채운다."""
+    return {**FIELDS, **(_editor_cfg(platform).get("fields") or {})}
 
 
 def audit(page, data: dict[str, Any]) -> dict[str, Any]:
@@ -650,7 +681,7 @@ def finalize(page) -> bool:
     제출(지원)과 다르다. 되돌릴 수 있고, 다시 편집하면 된다.
     """
     _dismiss(page)
-    btn = page.locator('button:has-text("작성 완료")')
+    btn = page.locator(_sel("finalize_button", 'button:has-text("작성 완료")'))
     if not btn.count():
         log.info("'작성 완료' 버튼이 없다 — 이미 완료 상태일 수 있다")
         return False
@@ -726,7 +757,7 @@ def fill(
         filled: dict[str, str] = {}
         missing: list[str] = []
 
-        for key, sel in FIELDS.items():
+        for key, sel in _fields().items():
             exists = p.locator(sel).count() > 0
             found[key] = exists
             if not exists:
@@ -747,7 +778,7 @@ def fill(
         for key in ("summary", "ai_usage") if "text" in steps else ():
             value = data.get(key)
             if value and found.get(key):
-                _set(p, FIELDS[key], str(value))
+                _set(p, _fields()[key], str(value))
                 filled[key] = str(value)[:40]
 
         # 경력 — 첫 칸만 채운다. 칸을 새로 만들지 않는다.
@@ -761,7 +792,7 @@ def fill(
             ):
                 if e.get(src) and found.get(key):
                     setter = _set_autocomplete if key in AUTOCOMPLETE else _set
-                    setter(p, FIELDS[key], str(e[src]))
+                    setter(p, _fields()[key], str(e[src]))
                     filled[key] = str(e[src])[:40]
 
             n_ach = _fill_achievements(p, e.get("achievements") or [])
@@ -771,7 +802,7 @@ def fill(
         # 학력 — 같은 원칙
         edus = data.get("educations") or []
         if "education" in steps and edus and found.get("edu_school"):
-            slots = _add_rows(p, FIELDS["edu_school"], len(edus))
+            slots = _add_rows(p, _fields()["edu_school"], len(edus))
             for n, ed in enumerate(edus[:slots]):
                 for key, src in (
                     ("edu_school", "school"),
@@ -780,7 +811,7 @@ def fill(
                 ):
                     if not (ed.get(src) and found.get(key)):
                         continue
-                    sel = f"{FIELDS[key]} >> nth={n}"
+                    sel = f"{_fields()[key]} >> nth={n}"
                     setter = _set_autocomplete if key in AUTOCOMPLETE else _set
                     setter(p, sel, str(ed[src]))
                     filled[f"{key}{n}"] = str(ed[src])[:40]
@@ -831,9 +862,9 @@ def fill(
         p.reload()
         p.wait_for_timeout(5000)
         persisted = {
-            k: bool(p.locator(FIELDS[k]).first.input_value().strip())
+            k: bool(p.locator(_fields()[k]).first.input_value().strip())
             for k in filled
-            if found.get(k) and k in FIELDS
+            if found.get(k) and k in _fields()
         }
         lost = [k for k, ok in persisted.items() if not ok]
 

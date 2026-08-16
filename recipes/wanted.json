@@ -14,7 +14,6 @@
     "CSS 모듈 해시라 배포 때마다 바뀐다 — 레시피가 조용히 깨지는 가장 흔한 원인이다."
   ],
   "login_dead_pattern": "id\\.wanted\\.co\\.kr|/login|/signup",
-
   "session_probe_url": "https://www.wanted.co.kr/cv",
   "session_alive_url": "/cv/list",
   "session_alive_selector": "button:has-text(\"새 이력서 작성\")",
@@ -26,8 +25,6 @@
     "URL 리다이렉트로도 구분되지만, '있어야 할 것이 있는지'(positive)로 본다.",
     "실패 URL을 나열하는 방식은 새 리다이렉트가 생길 때마다 조용히 뚫린다."
   ],
-
-
   "form_essays": false,
   "_form_essays_why": [
     "원티드 지원 폼에는 자소서 문항 입력란이 없다. 이력서 하나 고르고 제출이 전부다.",
@@ -37,29 +34,106 @@
     "자소설·사람인처럼 폼에 실제 문항 칸이 있는 플랫폼은 true로 둔다(기본값)."
   ],
   "steps": [
-    { "do": "goto", "url": "{job.url}" },
-
-    { "do": "click", "sel": "button:has-text(\"지원하기\") >> nth=0", "optional": true,
+    {
+      "do": "goto",
+      "url": "{job.url}"
+    },
+    {
+      "do": "click",
+      "sel": "button:has-text(\"지원하기\") >> nth=0",
+      "optional": true,
       "timeout_ms": 5000,
-      "_why": "패널을 여는 것뿐이라 되돌릴 수 있다. 이미 열려 있으면 버튼이 없으므로 건너뛴다" },
-
-    { "do": "expect", "sel": "#name", "timeout_ms": 15000,
-      "_why": "지원 패널이 떴다는 신호. 로그인이 풀렸으면 여기서 멈춘다" },
-
-    { "do": "check",
+      "_why": "패널을 여는 것뿐이라 되돌릴 수 있다. 이미 열려 있으면 버튼이 없으므로 건너뛴다"
+    },
+    {
+      "do": "expect",
+      "sel": "#name",
+      "timeout_ms": 15000,
+      "_why": "지원 패널이 떴다는 신호. 로그인이 풀렸으면 여기서 멈춘다"
+    },
+    {
+      "do": "check",
       "sel": "li:has(span:text-is(\"{job.resume}\")) input[type=checkbox][id^=\"resume-\"]",
-      "_why": "트랙에 맞는 이력서를 제목으로 정확히 고른다. nth=0(첫 번째)은 쓰면 안 된다 — 목록이 수정일 내림차순이라 순서가 바뀌고, '작성 중'인 미완성 이력서가 위로 올라올 수 있다. text-is는 완전일치라 '...사본'을 잘못 집지 않는다" },
-
-    { "do": "expect", "sel": "[data-attribute-id=\"apply__done__net\"]:not([disabled])",
+      "_why": "트랙에 맞는 이력서를 제목으로 정확히 고른다. nth=0(첫 번째)은 쓰면 안 된다 — 목록이 수정일 내림차순이라 순서가 바뀌고, '작성 중'인 미완성 이력서가 위로 올라올 수 있다. text-is는 완전일치라 '...사본'을 잘못 집지 않는다"
+    },
+    {
+      "do": "expect",
+      "sel": "[data-attribute-id=\"apply__done__net\"]:not([disabled])",
       "timeout_ms": 8000,
-      "_why": "이력서를 골라야 제출 버튼이 활성화된다. 비활성이면 체크가 실패한 것이므로 여기서 멈춘다 — 플랫폼이 만들어준 공짜 안전장치다" },
-
-    { "do": "submit", "sel": "[data-attribute-id=\"apply__done__net\"]" }
+      "_why": "이력서를 골라야 제출 버튼이 활성화된다. 비활성이면 체크가 실패한 것이므로 여기서 멈춘다 — 플랫폼이 만들어준 공짜 안전장치다"
+    },
+    {
+      "do": "submit",
+      "sel": "[data-attribute-id=\"apply__done__net\"]"
+    }
   ],
   "success_any": [
     "text=지원이 완료",
     "text=지원 완료",
     "text=지원해주셔서",
     "text=지원서가 전달"
-  ]
+  ],
+  "editor": {
+    "_why": [
+      "이력서 편집기 셀렉터. 파이썬이 아니라 여기 두는 이유:",
+      "자가수복 에이전트는 레시피(JSON)만 고칠 수 있다 — dry-run 스크린샷이라는",
+      "검증 오라클이 있기 때문이다. 파이썬 코드는 오라클이 없어 손대지 못하게",
+      "막아뒀으므로, 셀렉터가 코드에 있으면 UI가 바뀔 때 사람이 붙어야 한다.",
+      "",
+      "동작 방식(자동완성 확정, 날짜 피커, 행 호버 추가)은 데이터가 아니라",
+      "코드에 남긴다. 여기 있는 것은 '무엇을 가리키나'뿐이다."
+    ],
+    "url": "https://www.wanted.co.kr/cv",
+    "new_button": "button:has-text(\"새 이력서 작성\")",
+    "finalize_button": "button:has-text(\"작성 완료\")",
+    "title_anchor": "기본 이력서 설정",
+    "fields": {
+      "name": "input[name=\"name\"]",
+      "mobile": "input[name=\"mobile\"]",
+      "email": "input[name=\"email\"]",
+      "summary": "textarea[placeholder^=\"채용 담당자들이\"]",
+      "ai_usage": "textarea[placeholder^=\"AI를 업무에\"]",
+      "exp_company": "input[placeholder=\"회사명\"]",
+      "exp_job_role": "input[name=\"job_role\"]",
+      "exp_business_title": "input[name=\"business_title\"]",
+      "exp_achievement_title": "input[name=\"title\"]",
+      "exp_achievement_detail": "textarea[placeholder^=\"업무 경험을 성과\"]",
+      "edu_school": "input[placeholder=\"학교명\"]",
+      "edu_major": "input[placeholder=\"전공 및 학위\"]",
+      "edu_detail": "textarea[placeholder^=\"이수 과목\"]"
+    },
+    "autocomplete_fields": [
+      "exp_company",
+      "edu_school",
+      "edu_major"
+    ],
+    "prefilled_fields": [
+      "name",
+      "mobile",
+      "email"
+    ],
+    "achievement": {
+      "add_button": "button:has-text(\"주요 성과 추가\")",
+      "title": "input[name=\"title\"]",
+      "detail": "textarea[placeholder^=\"업무 경험을 성과\"]"
+    },
+    "skill": {
+      "activator": "text=직무 스킬",
+      "input": "input[placeholder*=\"보유 스킬\"]",
+      "option": "button:has(span:text-is(\"{value}\"))"
+    },
+    "link": {
+      "row": ".link-view",
+      "name": "input[placeholder*=\"링크명\"]",
+      "url": "input[placeholder*=\"https://\"]"
+    },
+    "row_add_icon": "button[wds-component=\"icon-button\"][data-variant=\"solid\"]",
+    "select_wrapper": "[data-role=\"select-render-wrapper\"]",
+    "select_placeholder": "[data-role=\"select-placeholder\"]",
+    "selects": {
+      "재직 형태": "정규직",
+      "졸업 상태": "졸업"
+    },
+    "date_button_pattern": "^(YYYY\\.MM|\\d{4}\\.\\d{2})$"
+  }
 }
