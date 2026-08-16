@@ -306,8 +306,31 @@ def _report_prepared(target: dict, result: dict) -> None:
             return
 
         shot = apply_res.get("evidence")
+
+        # 폰으로 보내기 전에 화면을 한 번 읽는다. 사람이 사진을 보고 판단하는
+        # 것과 같은 층위를 기계가 먼저 훑어, 명백한 문제는 캡션에 적어 보낸다.
+        verdict = ""
+        if shot:
+            from src.autoapply import vision
+
+            # 무엇을 보라고 할지가 중요하다. 전체 페이지 스크린샷에서 우측
+            # 지원 패널은 작게 잡히므로, 개별 입력값까지 확인하라고 하면
+            # "안 보인다"는 오탐이 난다. 사람이 사진으로 판단할 수 있는 수준 —
+            # 제출 버튼이 눌릴 상태인가, 이력서가 골라졌나 — 만 묻는다.
+            v = vision.verify(
+                shot,
+                "우측 지원 패널에 이력서가 하나 선택(체크)되어 있고, "
+                "'제출하기' 버튼이 회색이 아니라 활성화(파란색)되어 있어야 한다. "
+                "오류 배너나 '로그인' 화면이 보이면 안 된다.",
+                context="채용 플랫폼의 공고 상세 + 지원 패널 화면",
+            )
+            if v["ok"] is False and v["issues"]:
+                verdict = "\n⚠️ " + "\n⚠️ ".join(i.lstrip("- ")[:70] for i in v["issues"][:3])
+            elif v["ok"]:
+                verdict = "\n✅ 화면 점검 이상 없음"
+
         caption = (
-            f"📄 <b>지원 준비됨</b>\n{head}\n\n"
+            f"📄 <b>지원 준비됨</b>\n{head}{verdict}\n\n"
             f"확인 후 제출:\n<code>python cli.py autoapply {target['job_id']} --live</code>\n\n"
             f"<i>제출 시 이 공고용으로 이력서를 다시 채운 뒤 넣습니다.</i>"
         )
