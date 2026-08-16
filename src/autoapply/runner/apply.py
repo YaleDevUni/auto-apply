@@ -80,6 +80,61 @@ def _render(template: str, job: dict[str, Any]) -> str:
     return out
 
 
+def applied_state(s: PlaywrightSession, job: dict[str, Any], recipe: dict[str, Any]) -> bool | None:
+    """이 공고에 **이미 지원했는지** 본다. True / False / None(모름).
+
+    페이지를 여기서 연다 — 호출부가 어디에 있든 같은 답을 주게 하려는 것이다.
+
+    왜 필요한가: `apply_ledger`는 **우리가 낸 것만** 안다. 이 파이프라인을
+    쓰기 전에 사람이 직접 낸 지원은 어디에도 없어서, 그런 자리가 대기열에
+    그대로 올라온다. 그러면 이력서 조립(LLM 3~4회)과 사본 등록까지 다 한 뒤
+    지원 폼에서야 막힌다 — 돈과 시간을 다 쓰고 나서다.
+
+    모르면 모른다고 한다(None). 판정을 '지원함'으로 기울이면 멀쩡한 자리를
+    조용히 버리는데, 그건 이 파이프라인이 존재하는 이유를 깎아먹는다.
+    반대 방향(모르는데 진행)은 지원 폼에서 걸리므로 손해가 시간뿐이다.
+    """
+    cfg = recipe.get("applied_check") or {}
+    if not cfg:
+        return None
+
+    s.goto(_render(cfg.get("url", "{job.url}"), job))
+    s.assert_logged_in(recipe.get("login_dead_pattern", ""))
+    s.page().wait_for_timeout(int(cfg.get("wait_ms", 3500)))
+
+    for sel in cfg.get("applied_any") or []:
+        if s.page().locator(sel).count():
+            log.info("이미 지원한 공고 — %s (%s)", job.get("job_id"), sel)
+            return True
+    for sel in cfg.get("open_any") or []:
+        if s.page().locator(sel).count():
+            return False
+
+    log.warning(
+        "지원 여부를 못 읽었다 — 지원완료 표시도, 지원 패널도 없다 (공고 %s, %s). "
+        "레시피 applied_check가 낡았을 수 있다",
+        job.get("job_id"), s.url(),
+    )
+    return None
+
+
+def preflight(
+    job: dict[str, Any],
+    *,
+    session: PlaywrightSession | None = None,
+    headless: bool = False,
+) -> bool | None:
+    """`applied_state`를 브라우저 하나 열어서 확인한다(세션을 주면 그걸 쓴다)."""
+    recipe = load_recipe(job["platform"])
+    if not (recipe.get("applied_check") or {}):
+        return None
+    if session is not None:
+        return applied_state(session, job, recipe)
+    with browser(headless=headless, kind="지원여부 확인",
+                 label=f"공고 {job.get('job_id', '')}") as s:
+        return applied_state(s, job, recipe)
+
+
 def run(
     job: dict[str, Any],
     *,

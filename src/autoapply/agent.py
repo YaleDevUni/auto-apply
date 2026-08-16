@@ -130,10 +130,14 @@ def _claimed_today(conn: sqlite3.Connection) -> int:
 
     주의: mark_failed(release=True)는 행을 지우므로 그 시도는 여기 안 잡힌다.
     의도한 것이다 — 제출 전에 실패한 시도는 바깥세상에 아무것도 남기지 않았다.
+
+    'external'(파이프라인 밖에서 이미 지원한 자리)도 안 센다. 오늘 그걸
+    발견했다는 이유로 오늘 낼 수 있는 자리가 줄면, 대기열에 옛 지원이 많을수록
+    오늘 아무것도 못 내는 상태가 된다.
     """
     return conn.execute(
-        "SELECT COUNT(*) FROM apply_ledger WHERE substr(claimed_at,1,10)=?",
-        (_local_today(),),
+        "SELECT COUNT(*) FROM apply_ledger WHERE substr(claimed_at,1,10)=? AND status<>?",
+        (_local_today(), EXTERNAL),
     ).fetchone()[0]
 
 
@@ -199,6 +203,56 @@ def claim(job_id: int, conn: sqlite3.Connection | None = None) -> int | None:
             return cur.lastrowid
         except sqlite3.IntegrityError:
             # 같은 canonical_key가 이미 있다 = 이 자리는 이미 처리 중이거나 끝났다
+            return None
+    finally:
+        if own:
+            conn.close()
+
+
+EXTERNAL = "external"
+
+
+def record_external(job_id: int, conn: sqlite3.Connection | None = None) -> int | None:
+    """이 파이프라인 **밖에서** 이미 지원한 자리로 원장에 적는다.
+
+    반환: 새 원장 id, 또는 None(이미 원장에 있음 — 우리가 낸 것이든 아니든).
+
+    왜 원장에 적나: 대기열(`v_actionable`)이 이미 "원장에 있는 canonical_key는
+    빼고" 낸다. 같은 규칙에 얹으면 이 자리는 다시는 올라오지 않고, 같은 공고가
+    다른 플랫폼에 중복 게시돼 있어도 canonical_key가 같아 같이 걸린다.
+
+    상태를 'submitted'가 아니라 'external'로 두는 이유: 우리가 낸 게 아니다.
+    제출 건수·증적·성공률에 섞이면 "이 파이프라인이 무엇을 했나"를 못 읽는다.
+    일일 상한(`_claimed_today`)도 이 상태는 세지 않는다 — 오늘 발견했다는
+    이유로 오늘 낼 수 있는 자리가 줄면 안 된다.
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        job = conn.execute(
+            "SELECT id, canonical_key, company, title, platform FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise ValueError(f"공고 {job_id}가 없다")
+        if not job["canonical_key"]:
+            log.warning("공고 %s에 canonical_key가 없다 — 외부 지원 기록 생략", job_id)
+            return None
+        try:
+            cur = conn.execute(
+                """INSERT INTO apply_ledger
+                     (canonical_key, job_id, company, title, platform, status, claimed_at, error)
+                   VALUES (?,?,?,?,?, ?, ?, ?)""",
+                (
+                    job["canonical_key"], job["id"], job["company"], job["title"],
+                    job["platform"], EXTERNAL, now(),
+                    "파이프라인 밖에서 이미 지원함(플랫폼 화면에서 확인)",
+                ),
+            )
+            conn.commit()
+            log.info("외부 지원으로 기록 — 공고 %s %s", job_id, job["company"])
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
             return None
     finally:
         if own:
@@ -356,6 +410,8 @@ def status(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             "claimed": one("SELECT COUNT(*) FROM apply_ledger WHERE status='claimed'"),
             "submitted": one("SELECT COUNT(*) FROM apply_ledger WHERE status='submitted'"),
             "failed": one("SELECT COUNT(*) FROM apply_ledger WHERE status='failed'"),
+            # 파이프라인 밖에서 이미 지원해 둔 자리. 우리 제출 건수와 섞지 않는다.
+            "이미지원(외부)": one("SELECT COUNT(*) FROM apply_ledger WHERE status='external'"),
             "quota": quota(conn),
         }
     finally:

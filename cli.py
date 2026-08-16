@@ -401,6 +401,7 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
     prepared, attempted, items = 0, 0, []
     seen_ids: set[int] = set()
     stopped_by_human = False
+    skipped_applied = 0   # 이미 지원한 자리 — 목표에도, 실패에도 안 넣는다
     while prepared < target:
         # 건과 건 사이가 접기 좋은 자리다. 한 건은 이력서 등록까지 묶여 있어
         # 중간에 끊으면 절반만 채워진 이력서가 계정에 남는다.
@@ -425,7 +426,13 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
             ok = not (it.get("error") or it.get("stopped") or apply_err)
             if ok:
                 prepared += 1
-            items.append({"job_id": it["job_id"], "company": it.get("company"), "ok": ok})
+            # 이미 지원한 자리는 목표 건수에 넣지 않는다(ok=False라 이미 안 센다).
+            # 다만 실패로 세지도 않는다 — 고칠 게 없는 정상 동작이다. 그래서
+            # 따로 세어 보고에만 남긴다.
+            if it.get("already_applied"):
+                skipped_applied += 1
+            items.append({"job_id": it["job_id"], "company": it.get("company"), "ok": ok,
+                          **({"이미지원": True} if it.get("already_applied") else {})})
             # 실패한 건이 24시간 스킵 보호를 못 받는 경우(빌드 자체가 조기에
             # 죽어 resume_builds에 안 남는 경우)가 있다 — 그러면 next_targets가
             # 같은 job_id를 계속 다시 준다. 같은 id가 두 번 나오면 무한루프
@@ -472,6 +479,7 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
         "target": target,
         "prepared": prepared,
         "attempted": attempted,
+        "이미지원이라 건너뜀": skipped_applied,
         "stopped_reason": reason,
         "self_diagnosed": self_diagnosed,
         "items": items,
@@ -530,7 +538,13 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
         _report_prepared(t, r, defer=defer)
-    return {"prepared": len(out), "items": out}
+    # prepared는 "몇 건을 손댔나"이지 "몇 건이 준비됐나"가 아니다 — night-cycle이
+    # 이 값으로 대기열 소진만 판정하고, 성공 여부는 items를 보고 따로 센다.
+    return {
+        "prepared": len(out),
+        "already_applied": sum(1 for r in out if r.get("already_applied")),
+        "items": out,
+    }
 
 
 def _queue_notification(
@@ -595,6 +609,23 @@ def _report_prepared(target: dict, result: dict, *, defer: bool = False) -> None
         head = f"{target['fit_score']}점 · {target['company']} — {target['title'][:40]}"
         apply_res = result.get("apply") or {}
         err = result.get("error") or apply_res.get("error") or result.get("stopped")
+
+        # 이미 지원한 자리는 **실패가 아니다.** 같은 붉은 글씨로 보내면 사람이
+        # 고쳐야 할 것과 그냥 넘어간 것이 구분되지 않는다. 사진도 버튼도 없이
+        # 한 줄만 보낸다 — 판단할 게 없는 알림이다.
+        if result.get("already_applied"):
+            caption = (
+                f"⏭ <b>이미 지원한 공고</b>\n{head}\n"
+                "<i>예전에 직접 지원하신 자리입니다. 준비하지 않고 대기열에서 뺐습니다.</i>"
+            )
+            if defer:
+                _queue_notification(
+                    conn, job_id=target.get("job_id"), caption=caption,
+                    photo_path=None, buttons=None,
+                )
+            else:
+                telegram.notify(conn, caption)
+            return
 
         if err:
             caption = f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{str(err)[:200]}</i>"
@@ -942,6 +973,13 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     from src.autoapply.runner import resume_editor
     from src.autoapply.runner.lock import browser_lock
 
+    # 무엇보다 먼저 "여기 이미 냈나"를 본다. 아래 조립은 LLM 3~4회에 수 분이
+    # 걸리는데, 이미 지원한 자리면 그게 전부 버려진다(지원 폼에서야 막힌다).
+    # 페이지 한 번 여는 값으로 그걸 다 아낀다.
+    already = _skip_if_already_applied(job_id)
+    if already:
+        return already
+
     built = assemble.build_editor_json(job_id)
     if not built["ok"]:
         return {
@@ -990,6 +1028,46 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
                    "lost": filled.get("lost"), "skills": len(filled.get("skills", [])),
                    "shot": filled.get("shot"), "data": built["data"]},
         "apply": result,
+    }
+
+
+def _skip_if_already_applied(job_id: int) -> dict | None:
+    """이미 지원한 자리면 원장에 적고 건너뛸 이유를 돌려준다. 아니면 None.
+
+    `apply_ledger`는 **우리가 낸 것만** 안다. 이 파이프라인을 쓰기 전에 사람이
+    직접 낸 지원은 어디에도 없어서, 그런 자리가 대기열 상위에 그대로 올라온다
+    (실측: 공고 303920 젠스타파트너스 — 화면에 '지원완료' 버튼이 떠 있다).
+
+    한 번 발견하면 원장에 `external`로 적어 **다시는 올라오지 않게** 한다.
+    매번 확인하면 대기열에 옛 지원이 쌓일수록 확인만 하다 끝난다.
+
+    확인 자체가 실패하면(브라우저 사용 중, 세션 끊김, 셀렉터 낡음) 막지 않고
+    진행한다 — 모르는 것을 '지원함'으로 단정하면 멀쩡한 자리를 조용히 버린다.
+    반대 방향은 시간만 쓰고 지원 폼에서 걸린다.
+    """
+    from src.autoapply.runner import apply as apply_mod
+    from src.autoapply.runner.lock import BrowserBusy
+
+    log = logging.getLogger(__name__)
+    job = _job(job_id)
+    try:
+        state = apply_mod.preflight(job)
+    except BrowserBusy:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("이미 지원했는지 확인 실패(무시하고 진행): %s", e)
+        return None
+
+    if state is not True:
+        return None
+
+    agent.record_external(job_id)
+    return {
+        "already_applied": True,
+        "stopped": "이미 지원한 공고 — 준비하지 않는다",
+        "company": job.get("company"),
+        "url": job.get("url"),
+        "기록": "apply_ledger status=external (대기열에서 영구 제외, 제출 건수·한도에는 안 셈)",
     }
 
 
@@ -1079,6 +1157,13 @@ def _apply_with(job: dict, *, live: bool, headless: bool = False) -> dict:
     job_id = job["job_id"]
     if not live:
         return run(job, live=False, headless=headless)
+
+    # 제출 직전에 한 번 더 본다. 승인 버튼은 몇 시간 전 알림에서도 눌릴 수 있고,
+    # 그 사이 사람이 원티드에서 직접 냈을 수 있다. 선점(claim) **전에** 봐야
+    # 한다 — 선점부터 하면 그 자리가 오늘 한도 한 칸을 먹는다.
+    already = _skip_if_already_applied(job_id)
+    if already:
+        return {"skipped": True, "reason": "이미 지원한 공고", **already}
 
     ledger = agent.claim(job_id)
     if ledger is None:

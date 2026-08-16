@@ -342,9 +342,11 @@ WHERE j.closed_at IS NULL
   AND s.verdict = 'pass'
   AND a.actionable = 1
   -- 이미 지원했거나 지원 시도를 선점한 자리는 나오지 않는다.
+  -- 'external'은 파이프라인 밖에서(사람이 직접) 이미 지원한 자리다 — 우리가
+  -- 낸 게 아니라서 제출 통계에는 안 섞이지만, 다시 지원할 자리가 아닌 건 같다.
   AND j.canonical_key NOT IN (
       SELECT canonical_key FROM apply_ledger
-      WHERE status IN ('claimed', 'submitted')
+      WHERE status IN ('claimed', 'submitted', 'external')
   )
   -- 같은 canonical_key가 여러 플랫폼에 있으면 job_id가 가장 작은 것만 대표로 낸다.
   AND j.id = (
@@ -412,7 +414,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
 #
 # 뷰마다 '이 문자열이 정의에 있어야 한다'를 적어두고, 없으면 지운다.
 # 그 뒤 SCHEMA가 다시 만든다. 뷰는 데이터를 갖지 않으므로 안전하다.
-VIEW_MARKERS = {"v_actionable": "dropped_at"}
+VIEW_MARKERS = {"v_actionable": "'external'"}
 
 
 def _refresh_views(conn: sqlite3.Connection) -> None:
