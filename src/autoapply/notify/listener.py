@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import sqlite3
 from typing import Any, Callable
@@ -50,6 +51,13 @@ HELP = (
     "/pause   자동지원 정지\n"
     "/resume  재개\n"
     "/queue   개발 지시 큐\n\n"
+    "<b>작성 가이드 (Opus 5가 편집)</b>\n"
+    "/guide 지시문        가이드를 지시대로 고친다\n"
+    "/guide 되돌리기      마지막 백업으로 되돌린다\n\n"
+    "<b>수정 요청 원장 (직접 편집, LLM 없음)</b>\n"
+    "/revlog              목록\n"
+    "/revlog edit N 내용  N번을 고친다\n"
+    "/revlog delete N     N번을 지운다\n\n"
     "<b>개발 지시</b>\n"
     "그 외 아무 말이나 보내면 개발 큐에 쌓입니다.\n"
     "브랜치에만 커밋되고 main에는 안 닿습니다."
@@ -149,6 +157,97 @@ def _cmd_queue(conn) -> str:
     return "개발 지시 큐\n" + "\n".join(f"#{r['id']} [{r['status']}] {r['t']}" for r in rows)
 
 
+# ── 작성 가이드 / 원장 ───────────────────────────────────────────────
+
+def _fmt_entry(e: str) -> str:
+    return e[2:] if e.startswith("- ") else e
+
+
+def _cmd_guide(conn: sqlite3.Connection, rest: str) -> str:
+    """가이드(resume-guide.md) 수정. Opus 5가 편집하지만, 방아쇠는 사람이 당긴다 —
+    한 공고의 특수한 요구가 자동으로 규칙이 되면 이후 모든 이력서가 조용히 오염된다.
+    """
+    if not rest:
+        return (
+            "사용법: <code>/guide 지시문</code>\n"
+            "되돌리기: <code>/guide 되돌리기</code>\n\n"
+            "예: <i>/guide 영업 공고엔 인프라 경험을 빼라는 규칙을 §7-1에 추가</i>"
+        )
+
+    revert = rest in ("되돌리기", "revert", "복구")
+
+    # Opus 5 호출은 수 분 걸릴 수 있어 별도 프로세스로 돌린다 — 수신 루프가
+    # 막히면 그동안 온 다른 메시지(버튼 포함)를 못 받는다. 결과는 그 프로세스가
+    # 폰으로 직접 알린다 (cli.py의 _guide → _tell).
+    import subprocess
+
+    from ..paths import CODE_ROOT
+
+    argv = [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "guide"]
+    argv += (["되돌리기", "--revert"] if revert else [rest])
+    subprocess.Popen(
+        argv, cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+    )
+
+    if revert:
+        return "↩️ 가이드를 마지막 백업으로 되돌립니다…"
+    return (
+        f"🛠 가이드 수정을 시작합니다 (Opus 5).\n<i>{html.escape(rest[:150])}</i>\n\n"
+        "끝나면 변경 내용을 diff로 보내드립니다."
+    )
+
+
+def _cmd_revlog(conn: sqlite3.Connection, rest: str) -> str:
+    """원장(수정 요청 로그)을 사람이 직접 본다/고친다/지운다. LLM을 거치지 않는다 —
+    요약이 지시를 잘못 옮겼을 때 그 줄은 이후 모든 이력서 프롬프트에 실려 나가므로,
+    파일을 열지 않고도 그 자리에서 바로잡을 수 있어야 한다.
+    """
+    from .. import assemble
+
+    parts = rest.split(maxsplit=2)
+    verb = parts[0].lower() if parts else ""
+
+    if not rest or verb in ("목록", "list"):
+        entries = assemble.log_entries()
+        if not entries:
+            return "📒 원장이 비어 있습니다."
+        lines = [f"{i}. {html.escape(_fmt_entry(e))}" for i, e in enumerate(entries, 1)]
+        return (
+            "📒 <b>수정 요청 원장</b>\n" + "\n".join(lines) +
+            "\n\n고치기: <code>/revlog edit N 새내용</code>\n"
+            "지우기: <code>/revlog delete N</code>"
+        )
+
+    if verb in ("delete", "지우기") and len(parts) >= 2 and parts[1].isdigit():
+        n = int(parts[1])
+        try:
+            old = assemble.log_edit(n, None)
+        except IndexError as e:
+            return f"❌ {e}"
+        return f"🗑 원장 {n}번을 지웠습니다.\n<code>{html.escape(_fmt_entry(old))}</code>"
+
+    if verb in ("edit", "고치기") and len(parts) >= 3 and parts[1].isdigit():
+        n, new_text = int(parts[1]), parts[2]
+        try:
+            old = assemble.log_edit(n, new_text)
+        except IndexError as e:
+            return f"❌ {e}"
+        entries = assemble.log_entries()
+        now_line = entries[n - 1] if 1 <= n <= len(entries) else ""
+        return (
+            f"✏️ 원장 {n}번을 고쳤습니다.\n"
+            f"전: <code>{html.escape(_fmt_entry(old))}</code>\n"
+            f"후: <code>{html.escape(_fmt_entry(now_line))}</code>"
+        )
+
+    return (
+        "사용법:\n"
+        "<code>/revlog</code> — 목록\n"
+        "<code>/revlog edit N 새내용</code> — N번 수정\n"
+        "<code>/revlog delete N</code> — N번 삭제"
+    )
+
+
 COMMANDS: dict[str, Callable[[sqlite3.Connection], str]] = {
     "/status": _cmd_status,
     "/quota": _cmd_quota,
@@ -163,7 +262,16 @@ COMMANDS: dict[str, Callable[[sqlite3.Connection], str]] = {
 
 
 def _handle(conn: sqlite3.Connection, text: str) -> str:
-    cmd = text.strip().split()[0].lower()
+    stripped = text.strip()
+    cmd = stripped.split()[0].lower()
+
+    # /guide, /revlog는 뒤에 자유 텍스트(지시문·항목번호)가 붙으므로 COMMANDS의
+    # (conn) -> str 시그니처로는 못 다룬다. 여기서 먼저 가로챈다.
+    if cmd == "/guide":
+        return _cmd_guide(conn, stripped[len(cmd):].strip())
+    if cmd == "/revlog":
+        return _cmd_revlog(conn, stripped[len(cmd):].strip())
+
     if cmd in COMMANDS:
         try:
             return COMMANDS[cmd](conn)

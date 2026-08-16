@@ -126,6 +126,45 @@ def _log_entries() -> list[str]:
             if ln.startswith("- ")]
 
 
+def log_entries() -> list[str]:
+    """원장의 항목 줄만. 번호는 이 목록의 1-based 인덱스다."""
+    return _log_entries()
+
+
+def _write_entries(entries: list[str]) -> None:
+    """머리말은 보존하고 항목만 갈아끼운다."""
+    head = LOG_HEADER
+    if REVISION_LOG.exists():
+        body = REVISION_LOG.read_text(encoding="utf-8")
+        kept = [ln for ln in body.splitlines() if not ln.startswith("- ")]
+        head = "\n".join(kept).rstrip() + "\n\n"
+    REVISION_LOG.write_text(head + "\n".join(entries) + "\n", encoding="utf-8")
+
+
+def log_edit(n: int, text: str | None) -> str:
+    """n번 항목을 고치거나(text) 지운다(None). 고쳐진/지워진 줄을 돌려준다.
+
+    사람이 폰에서 직접 손대는 통로다. 요약이 지시를 잘못 옮겼을 때 그 줄은
+    앞으로 모든 이력서 프롬프트에 실려 나가므로, 파일을 열지 않고도 고칠 수
+    있어야 한다.
+    """
+    entries = _log_entries()
+    if not 1 <= n <= len(entries):
+        raise IndexError(f"{n}번 항목이 없다 (현재 {len(entries)}건)")
+
+    old = entries[n - 1]
+    if text is None:
+        entries.pop(n - 1)
+    else:
+        # 날짜·공고 머리는 유지하고 뒤의 내용만 바꾼다. 사람이 고치고 싶은 건
+        # 요약이지 어느 공고였는지가 아니다.
+        head, sep, _ = old.partition(" — ")
+        entries[n - 1] = f"{head}{sep}{text.strip()}" if sep else f"- {text.strip()}"
+
+    _write_entries(entries)
+    return old
+
+
 def load_revision_log(job_id: int | None = None) -> str:
     """프롬프트에 넣을 원장 블록. 없으면 빈 문자열.
 

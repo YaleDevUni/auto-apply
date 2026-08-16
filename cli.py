@@ -67,6 +67,15 @@ def main() -> int:
     rv.add_argument("job_id", type=int)
     rv.add_argument("feedback")
 
+    gp = sub.add_parser("guide", help="작성 가이드를 지시대로 고친다 (Opus 5, 백업 남김)")
+    gp.add_argument("instruction", help="예: 영업 공고엔 인프라 경험을 빼라는 규칙을 §7-1에 추가")
+    gp.add_argument("--revert", action="store_true", help="마지막 백업으로 되돌린다")
+
+    lgp = sub.add_parser("revlog", help="수정 요청 원장 보기 / 고치기")
+    lgp.add_argument("--edit", type=int, metavar="N", help="N번 항목을 고친다")
+    lgp.add_argument("--delete", type=int, metavar="N", help="N번 항목을 지운다")
+    lgp.add_argument("--text", default="", help="--edit 과 함께 쓸 새 내용")
+
     bp = sub.add_parser("builds", help="이력서 조립·등록 기록 (왜 미완인지)")
     bp.add_argument("--limit", type=int, default=8)
 
@@ -173,6 +182,10 @@ def main() -> int:
         _out(_browser_open())
     elif args.cmd == "revise":
         _out(_revise(args.job_id, args.feedback))
+    elif args.cmd == "guide":
+        _out(_guide(args.instruction, revert=args.revert))
+    elif args.cmd == "revlog":
+        _out(_revlog(edit=args.edit, delete=args.delete, text=args.text))
     elif args.cmd == "builds":
         conn = connect()
         try:
@@ -546,6 +559,58 @@ def _revise(job_id: int, feedback: str) -> dict:
         (result.get("resume") or {}).get("data"),
     )
     return {"revised": job_id, "resume": result.get("resume")}
+
+
+def _guide(instruction: str, *, revert: bool) -> dict:
+    """작성 가이드를 고치거나 마지막 백업으로 되돌린다.
+
+    텔레그램 수신 루프가 서브프로세스로 이 커맨드를 부른다 — Opus 5 호출은
+    수 분 걸릴 수 있어 수신을 막으면 안 되기 때문이다. 그래서 결과는
+    반환값이 아니라 폰으로 보낸다; 반환값은 터미널에서 직접 돌릴 때를 위한 것.
+    """
+    from src.autoapply import guide
+
+    result = guide.revert() if revert else guide.edit(instruction)
+    _tell(_guide_message(result, revert=revert))
+    return result
+
+
+def _guide_message(result: dict, *, revert: bool) -> str:
+    if revert:
+        if result.get("ok"):
+            return f"↩️ 가이드를 되돌렸습니다 — {html.escape(result['restored'])}"
+        return f"❌ 되돌리기 실패 — {html.escape(result.get('reason', ''))}"
+
+    if not result.get("ok"):
+        return f"❌ <b>가이드 수정 실패</b>\n{html.escape(result.get('reason', ''))}"
+
+    lines = [f"✅ <b>가이드 수정 {result['edits']}건</b>"]
+    lines += [f"· {html.escape(w)}" for w in result.get("why", [])]
+    if result.get("note"):
+        lines.append(f"\n📝 {html.escape(result['note'])}")
+    if result.get("diff"):
+        lines.append(f"\n<pre>{html.escape(result['diff'][:1200])}</pre>")
+    lines.append("\n되돌리려면: <code>/guide 되돌리기</code>")
+    return "\n".join(lines)
+
+
+def _revlog(*, edit: int | None, delete: int | None, text: str) -> dict:
+    """원장 항목을 본다 / 고친다 / 지운다. LLM을 거치지 않는다 — 요약이 지시를
+    잘못 옮겼을 때 파일을 열지 않고 바로 바로잡을 수 있어야 한다."""
+    from src.autoapply import assemble
+
+    if delete is not None:
+        old = assemble.log_edit(delete, None)
+        return {"deleted": delete, "was": old}
+
+    if edit is not None:
+        old = assemble.log_edit(edit, text)
+        entries = assemble.log_entries()
+        now_line = entries[edit - 1] if 1 <= edit <= len(entries) else ""
+        return {"edited": edit, "was": old, "now": now_line}
+
+    entries = assemble.log_entries()
+    return {"entries": entries, "count": len(entries)}
 
 
 def _fit_score(job_id: int) -> int:
