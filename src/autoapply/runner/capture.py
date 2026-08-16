@@ -111,9 +111,26 @@ def login(*, headless: bool = False, url: str = "https://id.wanted.co.kr/") -> d
     **카카오나 이메일 로그인을 쓴다.** 원티드 세션 쿠키만 프로필에 생기면 그 다음은
     어느 제공자로 받았든 똑같이 동작한다 — 로그인 제공자는 한 번 쓰고 버리는 통로다.
     """
-    s = PlaywrightSession(headless=headless)
+    # 상주 창이 프로필을 잡고 있으면 두 번째 Chrome은 아예 못 뜬다(프로필 잠금).
+    # 그럴 땐 그 창에 붙어서 로그인 페이지로 보낸다 — 사람은 숨겨둔 창을
+    # 다시 꺼내(Dock의 Chrome 클릭) 로그인하면 된다.
+    import httpx
+
+    from .session import CDP_URL
+
+    resident = False
+    try:
+        httpx.get(f"{CDP_URL}/json/version", timeout=2)
+        resident = True
+    except Exception:  # noqa: BLE001
+        pass
+
+    s = PlaywrightSession(headless=headless, hidden=resident)
     s.start()
     s.goto(url)
+    if resident:
+        print("\n※ 상주 브라우저 창에 로그인 페이지를 열었습니다.")
+        print("  숨겨두셨다면 Dock에서 Chrome을 눌러 창을 꺼내세요.\n", flush=True)
     print(
         "브라우저에서 로그인하세요.\n"
         "  → 구글은 자동화 브라우저를 차단합니다. 카카오 또는 이메일을 쓰세요.\n"

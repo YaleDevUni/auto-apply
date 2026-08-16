@@ -60,6 +60,8 @@ def main() -> int:
     sub.add_parser("blocked", help="막힌 이유 집계")
     sub.add_parser("quota", help="오늘 남은 지원 가능 건수")
 
+    sub.add_parser("browser-open", help="상주 브라우저 창을 띄운다 (한 번만 하면 된다)")
+
     rv = sub.add_parser("revise", help="수정 요청을 반영해 이력서를 다시 만들고 재검토 요청")
     rv.add_argument("job_id", type=int)
     rv.add_argument("feedback")
@@ -166,6 +168,8 @@ def main() -> int:
         _out(agent.blocked_summary())
     elif args.cmd == "quota":
         _out(agent.quota())
+    elif args.cmd == "browser-open":
+        _out(_browser_open())
     elif args.cmd == "revise":
         _out(_revise(args.job_id, args.feedback))
     elif args.cmd == "builds":
@@ -448,6 +452,52 @@ def _submit(job_id: int) -> dict:
 
     job = _job(job_id, resume_title=reg["resume_title"])
     return _apply_with(job, live=True)
+
+
+def _browser_open() -> dict:
+    """상주 브라우저를 띄우고 **그대로 둔다.**
+
+    이걸 한 번 돌리고 창을 숨기면(⌘H) 그 뒤로는 새 창이 뜨지 않는다.
+    이후 모든 작업은 이 창에 붙어서 돈다.
+
+    headless로는 못 한다 — 원티드가 CloudFront 단에서 403을 준다(실측).
+    창을 화면 밖으로 보내는 것도 macOS가 되돌린다. 남은 답이 이것이다.
+    """
+    import subprocess
+
+    from src.autoapply.runner.session import CDP_URL
+    from src.autoapply.paths import CODE_ROOT
+
+    import httpx
+
+    try:
+        httpx.get(f"{CDP_URL}/json/version", timeout=2)
+        return {"이미 떠 있음": CDP_URL, "할 일": "없음 — 그대로 쓰면 된다"}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 자식 프로세스로 띄우고 이 명령은 바로 끝난다. 브라우저는 남는다.
+    subprocess.Popen(
+        [str(CODE_ROOT / ".venv/bin/python"), "-c",
+         "import sys; sys.path.insert(0,'.');"
+         "from src.autoapply.runner.session import PlaywrightSession;"
+         "s=PlaywrightSession(hidden=False); s.start();"
+         "s.goto('https://www.wanted.co.kr/cv');"
+         "import time;\n"
+         "while True: time.sleep(3600)"],
+        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+    )
+    import time as _t
+
+    for _ in range(20):
+        _t.sleep(1)
+        try:
+            httpx.get(f"{CDP_URL}/json/version", timeout=2)
+            return {"띄웠다": CDP_URL,
+                    "다음": "이 창을 ⌘H로 숨기세요. 앞으로 새 창은 안 뜹니다."}
+        except Exception:  # noqa: BLE001
+            continue
+    return {"실패": "브라우저가 20초 안에 안 떴다"}
 
 
 def _revise(job_id: int, feedback: str) -> dict:

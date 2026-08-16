@@ -52,6 +52,31 @@ class Session(Protocol):
     def screenshot(self, path: Path) -> None: ...
 
 
+# 창을 숨기는 문제는 결국 **창을 몇 번 띄우느냐**의 문제였다.
+#
+# 시도했다가 버린 것들(전부 실측):
+#   --headless          원티드가 /cv 에서 403
+#   --headless=new      CloudFront 403 — "Request blocked"
+#   --window-position 음수  macOS가 화면 안으로 되돌린다
+#   System Events 로 숨기기  접근성 권한 대기로 시간 초과
+#
+# 남은 답: **창을 한 번만 띄우고 계속 붙는다.** 사람이 그 창을 한 번 숨기면
+# 그 뒤로 새 창이 안 뜨니 방해받지 않는다. 실행마다 브라우저가 뜨고 지는
+# 3~5초도 같이 사라진다.
+CDP_PORT = 9222
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
+
+
+def _hidden_default() -> bool:
+    """설정에서 읽는다. 기본은 숨김 — 사람 화면을 뺏지 않는 쪽이 기본이어야 한다."""
+    try:
+        from ..config import effective_config
+
+        return bool((effective_config().get("browser") or {}).get("hidden", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 class PlaywrightSession:
     """persistent context로 로그인 상태를 프로필 디렉터리에 유지한다.
 
@@ -65,19 +90,32 @@ class PlaywrightSession:
         headless: bool = False,
         user_data_dir: Path = BROWSER_DIR,
         channel: str | None = "chrome",
+        hidden: bool | None = None,
     ):
         self._headless = headless
+        # 창을 화면 밖에 띄운다. headless와 다르다 — 브라우저는 완전히 정상적인
+        # 헤디드 Chrome이고, 봇 판정에 걸릴 표면이 늘지 않는다. 원티드는
+        # headless를 막으므로 그쪽으로는 갈 수 없다.
+        #
+        # 무인 운영이 목표라 사람이 쓰는 화면을 계속 뺏으면 안 된다. 로그인처럼
+        # 사람이 봐야 하는 순간에만 hidden=False로 부른다.
+        self._hidden = _hidden_default() if hidden is None else hidden
         self._dir = user_data_dir
         self._channel = channel
         self._ctx: Any = None
         self._page: Any = None
         self._pw: Any = None
+        self._attached: Any = None
 
     def start(self) -> None:
         from playwright.sync_api import sync_playwright
 
         self._dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
+
+        # 이미 떠 있는 창이 있으면 거기 붙는다. 새로 띄우지 않는다.
+        if self._hidden and self._attach():
+            return
         opts: dict[str, Any] = dict(
             headless=self._headless,
             viewport={"width": 1440, "height": 900},
@@ -86,7 +124,11 @@ class PlaywrightSession:
             # 자동화 흔적 제거. OAuth 제공자(특히 구글)는 이걸 보고 로그인을 막는다.
             # --enable-automation은 UA와 navigator.webdriver에 자국을 남기고,
             # AutomationControlled는 페이지가 직접 읽을 수 있는 플래그다.
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                # 상주 창으로 쓸 수 있게 CDP를 열어둔다. 다음 실행이 여기 붙는다.
+                f"--remote-debugging-port={CDP_PORT}",
+            ],
             ignore_default_args=["--enable-automation"],
         )
         # 번들 Chromium 대신 실제 Chrome을 쓴다. 브랜딩·버전·구성요소가 전부
@@ -109,7 +151,46 @@ class PlaywrightSession:
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._page.set_default_timeout(15000)
 
+    def _attach(self) -> bool:
+        """떠 있는 Chrome에 붙는다. 없으면 False."""
+        try:
+            browser_ = self._pw.chromium.connect_over_cdp(CDP_URL, timeout=3000)
+        except Exception:  # noqa: BLE001
+            return False
+
+        try:
+            self._ctx = browser_.contexts[0] if browser_.contexts else browser_.new_context()
+            # 새로 띄울 때와 같은 은폐를 붙는 경우에도 건다. 빠뜨리면 상주
+            # 창으로 바꾼 순간부터 조용히 봇 판정 표면이 넓어진다.
+            try:
+                self._ctx.add_init_script(
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            # 탭을 새로 열지 않고 있는 것을 재사용한다. 탭이 늘면 사람이 그 창을
+            # 다시 열었을 때 지저분하고, 새 탭은 앱을 앞으로 끌어낼 수 있다.
+            self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+            self._page.set_default_timeout(15000)
+            self._attached = browser_
+            log.info("떠 있는 브라우저에 연결 (창을 새로 띄우지 않음)")
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.info("연결 실패 — 새로 띄운다: %s", e)
+            self._ctx = self._page = None
+            return False
+
     def close(self) -> None:
+        # 붙어서 쓴 창은 **닫지 않는다.** 닫으면 다음 실행이 다시 띄우게 되고,
+        # 사람이 숨겨둔 창이 사라져 애초의 문제로 돌아간다.
+        if getattr(self, "_attached", None) is not None:
+            try:
+                self._pw.stop()
+            except Exception as e:  # noqa: BLE001
+                log.debug("세션 정리 중 무시된 오류: %s", e)
+            self._ctx = self._page = self._pw = self._attached = None
+            return
+
         for obj, meth in ((self._ctx, "close"), (self._pw, "stop")):
             if obj is not None:
                 try:
@@ -191,8 +272,8 @@ class PlaywrightSession:
 
 
 @contextmanager
-def browser(*, headless: bool = False) -> Iterator[PlaywrightSession]:
-    s = PlaywrightSession(headless=headless)
+def browser(*, headless: bool = False, hidden: bool | None = None) -> Iterator[PlaywrightSession]:
+    s = PlaywrightSession(headless=headless, hidden=hidden)
     s.start()
     try:
         yield s
