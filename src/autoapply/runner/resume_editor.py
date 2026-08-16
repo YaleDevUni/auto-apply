@@ -1605,12 +1605,54 @@ def cleanup(*, dry_run: bool = True, headless: bool = False) -> dict[str, Any]:
 
         if dry_run:
             return {"dry_run": True, "total": len(items),
-                    "would_delete": candidates, "우리 것 아님(건너뜀)": skipped_not_ours}
+                    "would_delete": candidates, "우리 것 아님(건너뜀)": skipped_not_ours,
+                    "기록만 남은 것": _stale_records({it["title"] for it in items})}
 
         deleted = [c["title"] for c in candidates if delete_resume(page, c["title"])]
+        # 목록을 다시 뜨는 것과 같은 효과: 방금 지운 것까지 빼고 대조한다.
+        on_platform = {it["title"] for it in items} - set(deleted)
         return {"dry_run": False, "total": len(items), "deleted": deleted,
                 "failed": [c["title"] for c in candidates if c["title"] not in deleted],
-                "우리 것 아님(건너뜀)": skipped_not_ours}
+                "우리 것 아님(건너뜀)": skipped_not_ours,
+                "기록 정리": _prune_records(on_platform)}
+
+
+def _stale_records(on_platform: set[str]) -> list[str]:
+    """플랫폼에 없는데 `made_resumes`에 남아 있는 제목."""
+    from ..db import connect
+
+    conn = connect()
+    try:
+        titles = {r["title"] for r in conn.execute("SELECT title FROM made_resumes")}
+    finally:
+        conn.close()
+    return sorted(titles - on_platform)
+
+
+def _prune_records(on_platform: set[str]) -> dict[str, Any]:
+    """사라진 이력서의 기록을 지운다.
+
+    사람이 플랫폼에서 직접 지우는 일이 있다(개발 중 만든 시험 이력서 정리).
+    그러면 `made_resumes`에는 있는데 계정에는 없는 제목이 남고, 다음 사람이
+    그 목록을 보고 "아직 남아 있나?" 하고 헷갈린다. 근거로 쓸 수 없는 기록은
+    지우는 게 낫다 — 그 이력서는 이미 없으므로 소유 근거가 필요 없다.
+
+    `resume_builds`는 건드리지 않는다. 거기는 "무엇을 만들어 무엇을 냈는지"의
+    이력이고, 이력서가 사라졌다고 그 사실이 사라지는 게 아니다.
+    """
+    from ..db import connect
+
+    stale = _stale_records(on_platform)
+    if not stale:
+        return {"지운 기록": []}
+    conn = connect()
+    try:
+        with conn:
+            conn.executemany("DELETE FROM made_resumes WHERE title=?", [(t,) for t in stale])
+    finally:
+        conn.close()
+    log.info("플랫폼에 없는 이력서 기록 %d건 정리", len(stale))
+    return {"지운 기록": stale}
 
 
 def delete_after_submit(title: str, *, headless: bool = False) -> bool:

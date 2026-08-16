@@ -680,10 +680,21 @@ def _submit(job_id: int) -> dict:
     달라진다. 조립은 준비 단계에서 끝났고, 여기서는 그 이력서를 고를 뿐이다.
     """
     from src.autoapply import assemble
+    from src.autoapply.runner import resume_editor
 
     reg = assemble.registration(job_id)
     if not reg.get("resume_title"):
         return {"stopped": "등록된 이력서가 없다 — 먼저 준비(cycle-apply)해야 한다"}
+
+    # 보호 이력서(기본·사본메이커)가 등록돼 있으면 내지 않는다. 그건 그 공고에
+    # 맞춰 만든 이력서가 아니라 **원본**이다. 재사용 경로(preview_resume_url)가
+    # 남긴 기록이 그런 모양이고, 실제로 그 상태로 공고 33에 제출이 나갔다.
+    if reg["resume_title"] in resume_editor.protected_titles():
+        return {
+            "stopped": f"등록된 이력서가 원본이다: {reg['resume_title']}",
+            "이유": "공고에 맞춘 사본이 아니라 원본이라 제출하지 않는다",
+            "할 일": f"cli.py autoapply {job_id} 로 이 공고용 이력서를 새로 만들 것",
+        }
 
     job = _job(job_id, resume_title=reg["resume_title"])
     return _apply_with(job, live=True)
