@@ -60,6 +60,10 @@ def main() -> int:
     sub.add_parser("blocked", help="막힌 이유 집계")
     sub.add_parser("quota", help="오늘 남은 지원 가능 건수")
 
+    rv = sub.add_parser("revise", help="수정 요청을 반영해 이력서를 다시 만들고 재검토 요청")
+    rv.add_argument("job_id", type=int)
+    rv.add_argument("feedback")
+
     bp = sub.add_parser("builds", help="이력서 조립·등록 기록 (왜 미완인지)")
     bp.add_argument("--limit", type=int, default=8)
 
@@ -162,6 +166,8 @@ def main() -> int:
         _out(agent.blocked_summary())
     elif args.cmd == "quota":
         _out(agent.quota())
+    elif args.cmd == "revise":
+        _out(_revise(args.job_id, args.feedback))
     elif args.cmd == "builds":
         conn = connect()
         try:
@@ -411,10 +417,17 @@ def _report_prepared(target: dict, result: dict, data: dict | None = None) -> No
             + ("  ·  ".join(links) + "\n\n" if links else "")
             + "<i>이력서는 이미 만들어져 있습니다. 승인하면 그대로 제출합니다.</i>"
         )
-        buttons = [[
-            {"text": "✅ 제출", "callback_data": f"submit:{target['job_id']}"},
-            {"text": "➖ 건너뛰기", "callback_data": f"skip:{target['job_id']}"},
-        ]]
+        # 세 갈래다. '건너뛰기'만 있던 때는 같은 공고가 다음 사이클에 또 올라와
+        # 같은 판단을 반복하게 했다. 거절에도 종류가 있다 —
+        #   폐기   이 자리는 아니다. 다시 올리지 마라
+        #   수정   자리는 맞는데 내용이 아니다. 고쳐서 다시 가져와라
+        buttons = [
+            [{"text": "✅ 승인 (제출)", "callback_data": f"submit:{target['job_id']}"}],
+            [
+                {"text": "🗑 폐기", "callback_data": f"drop:{target['job_id']}"},
+                {"text": "✏️ 수정요청", "callback_data": f"revise:{target['job_id']}"},
+            ],
+        ]
         if not (shot and telegram.send_photo(conn, shot, caption, buttons)):
             telegram.notify(conn, caption)
     finally:
@@ -435,6 +448,63 @@ def _submit(job_id: int) -> dict:
 
     job = _job(job_id, resume_title=reg["resume_title"])
     return _apply_with(job, live=True)
+
+
+def _revise(job_id: int, feedback: str) -> dict:
+    """사람의 수정 요청을 반영해 다시 만들고, 검토를 다시 요청한다.
+
+    캐시를 건너뛰고 조립부터 다시 한다 — 피드백은 입력이 바뀐 것이라서
+    캐시된 결과를 재사용하면 요청이 반영되지 않는다.
+
+    앞서 만든 이력서는 플랫폼에 그대로 두고 새로 만든다. 지우려면 브라우저를
+    한 번 더 띄워야 하고, 그 사이에 실패하면 아무것도 없는 상태가 된다.
+    정리는 `resumes --cleanup`이 나중에 한다.
+    """
+    from src.autoapply import assemble
+
+    log = logging.getLogger(__name__)
+    log.info("공고 %s 재작성 — %s", job_id, feedback[:80])
+
+    built = assemble.build_editor_json(job_id, feedback=feedback)
+    if not built["ok"]:
+        _tell(f"❌ <b>재작성 중단</b> — 공고 {job_id}\n"
+              f"필수요건 미충족 {built['required_gaps']}건\n"
+              "<i>수정 요청이 사실 저장소에 없는 내용을 요구했을 수 있습니다.</i>")
+        return {"stopped": "재작성 후에도 필수요건 미충족", "gaps": built["required_gaps"]}
+
+    result = _autoapply(job_id, resume_url=None, live=False)
+    target = _job(job_id)
+    target["fit_score"] = target.get("fit_score") or 0
+    _report_prepared(
+        {**target, "job_id": job_id, "fit_score": _fit_score(job_id)},
+        result,
+        (result.get("resume") or {}).get("data"),
+    )
+    return {"revised": job_id, "resume": result.get("resume")}
+
+
+def _fit_score(job_id: int) -> int:
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT fit_score FROM screening WHERE job_id=?", (job_id,)
+        ).fetchone()
+        return int(row["fit_score"]) if row and row["fit_score"] is not None else 0
+    finally:
+        conn.close()
+
+
+def _tell(text: str) -> None:
+    """폰으로 한 줄 보낸다. 실패해도 흐름을 멈추지 않는다."""
+    from src.autoapply.notify import telegram
+
+    conn = connect()
+    try:
+        telegram.notify(conn, text)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("알림 실패: %s", e)
+    finally:
+        conn.close()
 
 
 def _resume_title(job: dict) -> str:
@@ -499,8 +569,11 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     result = _apply_with(job, live=live)
     return {
         "company": built["company"],
+        # data를 함께 돌려준다. 폰으로 보내는 미리보기는 **제출될 내용**을
+        # 그려야 하는데, 그 재료가 이것이다.
         "resume": {"title": filled["title"], "url": filled["url"],
-                   "lost": filled.get("lost"), "skills": len(filled.get("skills", []))},
+                   "lost": filled.get("lost"), "skills": len(filled.get("skills", [])),
+                   "data": built["data"]},
         "apply": result,
     }
 

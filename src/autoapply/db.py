@@ -274,6 +274,7 @@ FROM jobs j
 JOIN screening     s ON s.job_id = j.id
 JOIN applicability a ON a.job_id = j.id
 WHERE j.closed_at IS NULL
+  AND j.dropped_at IS NULL   -- 사람이 폐기한 자리는 다시 묻지 않는다
   AND s.verdict = 'pass'
   AND a.actionable = 1
   -- 이미 지원했거나 지원 시도를 선점한 자리는 나오지 않는다.
@@ -320,6 +321,9 @@ def now() -> str:
 # 캐시에 가깝다. 유일하게 못 지우는 건 apply_ledger(중복지원 방어)인데 그건
 # 스키마가 안 바뀐다. 도구를 들이는 비용이 얻는 것보다 크다.
 MIGRATIONS: dict[str, dict[str, str]] = {
+    # 사람이 '폐기'를 누른 공고. applicability에 적으면 reevaluate가 덮어써서
+    # 폐기가 풀린다 — 판정은 다시 계산되는 값이지만 사람의 결정은 아니다.
+    "jobs": {"dropped_at": "TEXT"},
     "resume_builds": {
         # 섹션별 채우기 결과(JSON)와 플랫폼이 표시한 완성도.
         # 실패가 로그 문자열로만 남으면 사후에 못 쓴다 — "왜 71%에서 멈췄나"를
@@ -333,6 +337,24 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "skills": "TEXT NOT NULL DEFAULT '[]'",
     },
 }
+
+
+# 뷰 정의가 바뀌어도 CREATE VIEW IF NOT EXISTS는 갱신하지 않는다. 컬럼을
+# 늘렸는데 뷰가 옛것이면 조용히 예전 규칙으로 계속 돈다 — 폐기를 눌러도
+# 그 공고가 계속 올라온다. 조용한 실패라 더 위험하다.
+#
+# 뷰마다 '이 문자열이 정의에 있어야 한다'를 적어두고, 없으면 지운다.
+# 그 뒤 SCHEMA가 다시 만든다. 뷰는 데이터를 갖지 않으므로 안전하다.
+VIEW_MARKERS = {"v_actionable": "dropped_at"}
+
+
+def _refresh_views(conn: sqlite3.Connection) -> None:
+    for name, marker in VIEW_MARKERS.items():
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name=?", (name,)
+        ).fetchone()
+        if row and marker not in (row["sql"] or ""):
+            conn.execute(f"DROP VIEW {name}")
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -353,6 +375,10 @@ def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     _migrate(conn)
+    # 컬럼을 늘린 **뒤에** 뷰를 손봐야 한다. 순서가 반대면 없는 컬럼을
+    # 참조하는 뷰를 만들려다 실패한다.
+    _refresh_views(conn)
+    conn.executescript(SCHEMA)
     return conn
 
 

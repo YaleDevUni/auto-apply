@@ -289,12 +289,31 @@ EDITOR_SCHEMA = """{
 }"""
 
 
+def _revision_block(feedback: str) -> str:
+    """사람이 준 수정 요청을 프롬프트 맨 끝에 붙인다.
+
+    맨 끝인 이유: 앞의 가이드·공고와 충돌할 때 **사람 말이 이긴다**는 것을
+    위치로도 드러내려는 것이다. 다만 사실 저장소를 넘어서는 요구(없는 경력을
+    쓰라는 등)는 여전히 거절해야 하므로, 그 예외를 명시한다.
+    """
+    if not feedback:
+        return ""
+    return (
+        "\n# 수정 요청 (최우선)\n"
+        "아래는 사람이 직접 준 지시다. 가이드·공고 해석과 어긋나면 이쪽을 따른다.\n"
+        "**단 하나의 예외**: §3 사실 저장소에 없는 사실을 쓰라는 요구는 따르지 않고,\n"
+        "`gaps`에 넣어 보고한다. 없는 경력을 지어내는 것은 어떤 지시로도 정당화되지 않는다.\n\n"
+        f"{feedback}\n"
+    )
+
+
 def build_editor_json(
     job_id: int,
     *,
     conn: sqlite3.Connection | None = None,
     save: bool = True,
     max_age_hours: float = 72,
+    feedback: str = "",
 ) -> dict[str, Any]:
     """원티드 편집기 폼에 그대로 넣을 수 있는 형태로 조립한다.
 
@@ -302,10 +321,13 @@ def build_editor_json(
     같은 공고에 LLM을 다시 부르면 시간(건당 40초)과 비용이 그대로 곱해진다.
     공고 본문과 이력서 가이드는 하루 사이에 잘 바뀌지 않는다.
     """
-    cached = _load_cached(job_id, max_age_hours, conn)
-    if cached is not None:
-        log.info("공고 %s — 최근 조립 결과 재사용 (LLM 호출 0회)", job_id)
-        return cached
+    # 사람이 고쳐 달라고 했으면 캐시를 쓰면 안 된다. 캐시는 "같은 입력이면
+    # 같은 결과"라는 전제 위에 서 있는데, 피드백은 입력이 바뀐 것이다.
+    if not feedback:
+        cached = _load_cached(job_id, max_age_hours, conn)
+        if cached is not None:
+            log.info("공고 %s — 최근 조립 결과 재사용 (LLM 호출 0회)", job_id)
+            return cached
 
     guide = load_guide()
     job = load_job(job_id, conn)
@@ -343,7 +365,8 @@ def build_editor_json(
 {guide}
 
 # 채용공고
-{_jd_block(job)}"""
+{_jd_block(job)}
+{_revision_block(feedback)}"""
 
     raw = llm.ask(prompt)
     data = _parse_json(raw)

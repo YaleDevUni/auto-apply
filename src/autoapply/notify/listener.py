@@ -28,6 +28,10 @@ from typing import Any, Callable
 import httpx
 
 from ..db import get_setting, now, set_setting
+# 모듈째 들여온다. 이름만 가져오면(`from .telegram import notify`) 콜백 처리에서
+# 쓰는 `telegram.answer_callback`이 NameError로 죽는다 — 실제로 '건너뛰기'
+# 버튼이 그 상태였다. 버튼을 눌렀는데 아무 일도 안 일어나는 실패라 눈에 안 띈다.
+from . import telegram
 from .telegram import API, S_CHAT, S_TOKEN, _creds, notify
 
 log = logging.getLogger(__name__)
@@ -243,12 +247,54 @@ def drain(conn: sqlite3.Connection, *, reply: bool = True, wait: int = 0) -> dic
             ignored += 1
             continue
 
+        # 수정요청을 눌러둔 상태면, 이 메시지는 명령이 아니라 **수정 지시**다.
+        pending = get_setting(conn, AWAITING_KEY, "")
+        if pending:
+            set_setting(conn, AWAITING_KEY, "")
+            if text.strip() in ("취소", "cancel", "/cancel"):
+                answer = f"수정요청을 취소했습니다 — 공고 {pending}"
+            else:
+                _start_revision(conn, pending, text)
+                answer = (
+                    f"✏️ 공고 {pending} 재작성을 시작합니다.\n"
+                    f"<i>{text[:120]}</i>\n\n다 되면 다시 검토 요청을 보냅니다."
+                )
+            handled += 1
+            if reply:
+                notify(conn, answer)
+            continue
+
         answer = _handle(conn, text)
         handled += 1
         if reply:
             notify(conn, answer)
 
     return {"received": len(updates), "handled": handled, "ignored": ignored}
+
+
+# 수정요청을 누른 뒤 사람의 다음 메시지를 기다리는 상태. 값은 공고 id.
+AWAITING_KEY = "awaiting_revision"
+
+
+def _drop_job(conn: sqlite3.Connection, job_id: str) -> None:
+    """지원 대상에서 영구히 뺀다. 사람이 아니라고 한 자리는 다시 묻지 않는다."""
+    conn.execute("UPDATE jobs SET dropped_at=? WHERE id=?", (now(), job_id))
+    conn.commit()
+
+
+def _start_revision(conn: sqlite3.Connection, job_id: str, feedback: str) -> None:
+    """수정 요청을 반영해 다시 만든다. 브라우저를 띄우고 수 분이 걸리므로
+    별도 프로세스로 돌린다 — 수신 루프가 막히면 다음 지시를 못 받는다."""
+    import subprocess
+
+    from ..paths import CODE_ROOT
+
+    subprocess.Popen(
+        [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "revise", job_id, feedback],
+        cwd=str(CODE_ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+    )
 
 
 def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
@@ -264,6 +310,31 @@ def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
     if data.startswith("skip:"):
         telegram.answer_callback(conn, cb_id, "넘어갑니다")
         notify(conn, f"➖ 건너뜀 — 공고 {data.split(':', 1)[1]}")
+        return
+
+    # 폐기 — 이 자리는 아니다. 다시 올라오지 않게 막는다. 건너뛰기와 다른 점이
+    # 이것이다: 건너뛰기는 다음 사이클에 같은 공고를 또 올려 같은 판단을
+    # 반복시켰다.
+    if data.startswith("drop:"):
+        job_id = data.split(":", 1)[1]
+        _drop_job(conn, job_id)
+        telegram.answer_callback(conn, cb_id, "지원 대상에서 제외했습니다")
+        notify(conn, f"🗑 폐기 — 공고 {job_id}는 다시 올리지 않습니다")
+        return
+
+    # 수정요청 — 자리는 맞는데 내용이 아니다. 무엇을 고칠지 받아야 하므로
+    # 여기서 끝내지 않고 다음 메시지를 기다린다.
+    if data.startswith("revise:"):
+        job_id = data.split(":", 1)[1]
+        set_setting(conn, AWAITING_KEY, job_id)
+        telegram.answer_callback(conn, cb_id, "무엇을 고칠까요?")
+        notify(
+            conn,
+            f"✏️ <b>공고 {job_id} 수정요청</b>\n"
+            "무엇을 고칠지 이 채팅에 그대로 적어주세요.\n"
+            "<i>예: 인프라 경험 말고 백엔드 API 설계를 앞에 세워줘</i>\n\n"
+            "취소하려면 <code>취소</code> 라고 보내세요.",
+        )
         return
 
     if not data.startswith(("submit:", "apply:")):
