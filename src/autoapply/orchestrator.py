@@ -209,8 +209,13 @@ def _editor_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return items
 
 
-def _self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """A 파이프라인이 남긴 신호를 할 일로 바꾼다. LLM 호출 0회로 판단한다."""
+def self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """A 파이프라인이 남긴 신호를 할 일로 바꾼다. LLM 호출 0회로 판단한다.
+
+    `gather()`가 내부에서 쓰지만, `night-cycle`도 "improve를 자동으로 부를지"
+    판단하는 데 이 함수 하나만 필요하다(사람 지시 큐는 안 본다 — 그건 사람이
+    `/improve`로 직접 불러야 처리된다). 그래서 공개 함수로 둔다.
+    """
     items: list[dict[str, Any]] = []
 
     # 1) 지원 실패가 쌓였다 = 레시피가 현실과 안 맞는다
@@ -272,7 +277,7 @@ def _self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def gather(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """사람 지시가 항상 먼저다."""
-    return _human_items(conn) + _self_items(conn) + _editor_items(conn)
+    return _human_items(conn) + self_items(conn) + _editor_items(conn)
 
 
 # ─────────────────────── 실행 ───────────────────────

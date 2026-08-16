@@ -1,11 +1,20 @@
 #!/bin/bash
-# launchd 진입점. 두 파이프라인을 순서대로 돌린다.
+# launchd 진입점. 모드 인자로 무엇을 할지 정한다 — "지금 몇 시지?"를
+# 스크립트가 다시 추측하지 않는다.
 #
-#   A. 지원 파이프라인   수집 → 판정 → 이상감지.  무거워서 하루 3번만(04/10/16시).
-#   B. 개선 오케스트레이터  폰 지시 + 자체 진단 → 브랜치 작업.  매 사이클.
+#   night  02:00  수집 → 지원준비를 목표건수/대기열 소진까지 반복.
+#                 알림은 안 보낸다(쌓아만 둠). 이력서 정리도 여기서 하루 한 번.
+#   flush  09:00  밤사이 쌓인 알림을 한 번에 보낸다.
 #
-# B를 매번 도는 이유: Claude 사용 한도에 걸린 일은 큐로 되돌아간다. 자주 깨어나야
-# 한도가 풀린 시점을 놓치지 않고 이어받는다 — 새벽에도 알아서 진행된다.
+# 과거엔 무거운 단계를 "몇 시냐"로 걸었다가(3/9/15시) launchd가 짝수 시각에만
+# 깨우는 것과 어긋나 **수집이 한 번도 실행되지 않았다.** 이번엔 시각을 여기
+# 다시 적지 않는다 — plist가 어느 모드로 부를지 인자로 넘기고, 이 스크립트는
+# 그 인자만 본다. 두 곳에 시각을 따로 적을 일 자체가 없다.
+#
+# 자기개선(improve)은 더는 여기서 시간이 되면 자동으로 안 돈다. night-cycle이
+# 끝에서 자체진단(자체진단 신호가 있을 때만) 스스로 호출하고, 그 외엔 사람이
+# 텔레그램 /improve로 부를 때만 돈다 — 상주 리스너(com.autoapply.listen)가
+# 그건 처리한다.
 #
 # launchd는 로그인 셸을 안 거쳐 PATH가 최소한이다. claude CLI 경로를 명시하지
 # 않으면 매 실행 죽는다.
@@ -17,58 +26,31 @@ cd "$REPO" || exit 1
 mkdir -p data/logs
 
 PY="$REPO/.venv/bin/python"
-echo "=== $(date '+%F %T') 사이클 시작 ==="
+MODE="${1:?사용법: run.sh night|flush}"
+echo "=== $(date '+%F %T') [$MODE] 시작 ==="
 
-# 무거운 단계는 "몇 시냐"가 아니라 "마지막으로 언제 했냐"로 정한다.
-#
-# 처음엔 시각으로 걸었다(3/9/15시). launchd는 짝수 시각에만 깨우므로 교집합이
-# 없어 **수집과 지원 준비가 스케줄로는 한 번도 실행되지 않았다.** 두 곳에 적힌
-# 시각이 어긋나면 조용히 아무 일도 안 일어난다.
-#
-# 경과 시간으로 보면 그 결합이 사라진다. 맥이 잠들어 몇 번 걸러도 깨어난 뒤
-# 한 번은 돈다.
-due() {  # due <표시> <최소간격시간>  → 지났으면 0
-  local stamp="$REPO/data/logs/.last_$1" hours="$2"
-  [[ -f "$stamp" ]] || return 0
-  local age=$(( ($(date +%s) - $(stat -f %m "$stamp")) / 3600 ))
-  (( age >= hours ))
-}
-mark() { touch "$REPO/data/logs/.last_$1"; }
-
-# ── 폰에서 온 메시지 수신 (운영 명령 즉시 처리 + 개발 지시 큐 적재)
+# 상주 리스너가 실시간으로 받지만, 혹시 죽어 있었을 경우의 안전망 —
+# 쌓인 게 있으면 여기서 한 번 걷어간다. 운영 명령만 즉시 처리하고,
+# 개발 지시는 큐에 넣기만 한다(자동으로 돌리지 않는다).
 "$PY" cli.py listen || echo "listen 실패 (건너뜀)"
 
-# ── A: 지원 파이프라인. 무거우므로 지정 시각에만.
-if due scrape 6; then
-  echo "--- A: 수집·판정 ---"
-  "$PY" cli.py scrape --check-session || echo "scrape 실패 (다음 사이클이 이어받는다)"
-  mark scrape
-else
-  echo "--- A: 건너뜀 (마지막 수집 이후 6시간 미만) ---"
-fi
+case "$MODE" in
+  night)
+    echo "--- 수집 → 지원준비 (목표 30건 또는 대기열 소진까지, 알림은 9시에) ---"
+    "$PY" cli.py night-cycle --target 30 --defer || echo "night-cycle 실패 (다음날 이어받는다)"
 
-# ── 대기열 상위 1건을 dry-run으로 준비. 제출은 하지 않는다.
-#
-# 수집 시각에만 돌린다. 건당 원티드에 이력서가 하나 생기므로 2시간마다 돌리면
-# 하루 12개가 쌓인다. 하루 3건이면 검토할 양으로도 적당하다.
-if due apply 6; then
-  echo "--- A2: 지원 준비 (dry-run) ---"
-  "$PY" cli.py cycle-apply --limit 1 || echo "cycle-apply 실패 (다음 사이클이 이어받는다)"
-  mark apply
-else
-  echo "--- A2: 건너뜀 (마지막 준비 이후 6시간 미만) ---"
-fi
+    echo "--- 이력서 정리 ---"
+    "$PY" cli.py resumes --cleanup || echo "정리 실패 (다음날 재시도)"
+    ;;
+  flush)
+    echo "--- 새벽에 준비된 것들 보내기 ---"
+    "$PY" cli.py flush-notify || echo "flush-notify 실패"
+    ;;
+  *)
+    echo "모르는 모드: $MODE (night 또는 flush)" >&2
+    exit 1
+    ;;
+esac
 
-# ── 쌓인 이력서 정리. 하루 한 번이면 충분하다.
-if due cleanup 24; then
-  echo "--- 이력서 정리 ---"
-  "$PY" cli.py resumes --cleanup || echo "정리 실패 (다음 사이클)"
-  mark cleanup
-fi
-
-# ── B: 개선 오케스트레이터. 한 사이클에 1건만 — 브랜치가 쌓이면 검토가 불가능해진다.
-echo "--- B: 자기개선 ---"
-"$PY" cli.py improve --limit 1 || echo "improve 실패 (다음 사이클이 이어받는다)"
-
-echo "=== $(date '+%F %T') 종료 ==="
+echo "=== $(date '+%F %T') [$MODE] 종료 ==="
 "$PY" cli.py quota

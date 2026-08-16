@@ -181,7 +181,7 @@ flowchart TD
       night-cycle을 그 건수로 돌린다. 즉시 알림 모드. 오래 걸리므로(건당
       수 분) `/guide`처럼 서브프로세스로 돌려 수신 루프를 막지 않는다
 - [ ] 자기개선 자동 호출 조건화 — `run.sh`에서 매 사이클 `improve` 호출을
-      없애고, 새벽 루프 끝에서 `orchestrator._self_items()`(자체진단, LLM
+      없애고, 새벽 루프 끝에서 `orchestrator.self_items()`(자체진단, LLM
       호출 없음)가 뭔가 있을 때만 `cli.py improve`를 부른다. 사람 지시
       큐(control_queue)는 더는 시간이 지나면 자동으로 안 돌고, 텔레그램
       `/improve` 명령으로 사람이 불러야 처리된다 — 지금 도움말 문구

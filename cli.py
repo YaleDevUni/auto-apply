@@ -139,6 +139,15 @@ def main() -> int:
 
     sub.add_parser("flush-notify", help="쌓인 지원 준비 알림을 순서대로 보낸다")
 
+    ncp = sub.add_parser(
+        "night-cycle",
+        help="수집 → 지원준비를 목표건수 또는 대기열 소진까지 반복 (제출 안 함)")
+    ncp.add_argument("--target", type=int, default=30)
+    ncp.add_argument(
+        "--defer", action="store_true",
+        help="알림을 즉시 안 보내고 쌓아둔다 (새벽 자동실행용). "
+             "사람이 텔레그램으로 직접 부를 땐 안 씀 — 바로 받아야 한다")
+
     sbp = sub.add_parser(
         "submit", help="이미 등록된 이력서로 제출만 한다 (조립·입력 없음)")
     sbp.add_argument("job_id", type=int)
@@ -294,11 +303,111 @@ def main() -> int:
         _out(_cycle_apply(args.limit, defer=args.defer))
     elif args.cmd == "flush-notify":
         _out(_flush_notifications())
+    elif args.cmd == "night-cycle":
+        _out(_night_cycle(args.target, defer=args.defer))
     elif args.cmd == "submit":
         _out(_submit(args.job_id))
     elif args.cmd == "apply":
         _out(_apply(args.job_id, live=args.live, headless=args.headless))
     return 0
+
+
+def _night_cycle(target: int, *, defer: bool = False) -> dict:
+    """수집 한 번 → 지원준비(dry-run)를 목표건수 또는 대기열 소진까지 반복한다.
+
+    수집을 준비마다 반복하지 않는다. 같은 새벽 시간대엔 새 공고가 계속 올라오지
+    않으므로, 한 번 모아둔 대기열을 `next_targets`가 더 못 주는 시점이 곧
+    "더 지원할 게 없다"는 판정이다 — 거기서 멈춘다.
+
+    `cycle-apply`를 limit=1로 반복 호출하는 이유: 그쪽이 이미 스킵·재사용·
+    알림 로직을 갖고 있다. 여기서 다시 구현하면 두 경로가 갈라져 한쪽만
+    고치는 버그가 난다.
+    """
+    from src.autoapply import health
+    from src.autoapply.db import connect as _connect
+    from src.autoapply.notify.listener import is_paused
+    from src.autoapply.runner import check_all
+
+    log = logging.getLogger(__name__)
+
+    conn = _connect()
+    try:
+        if is_paused(conn):
+            return {"skipped": "일시정지 상태 (텔레그램 /resume 으로 해제)"}
+    finally:
+        conn.close()
+
+    session_ok = check_all()
+    scraped = pipeline.run_all(session_ok=session_ok)
+    agent.notify_login_required()
+    findings = health.run().get("findings", [])
+
+    prepared, attempted, items = 0, 0, []
+    seen_ids: set[int] = set()
+    while prepared < target:
+        r = _cycle_apply(1, defer=defer)
+        n = r.get("prepared", 0)
+        if n == 0:
+            log.info("night-cycle: 대기열 소진 (%d/%d 준비, %s)",
+                      prepared, target, r.get("reason", "알 수 없음"))
+            break
+        attempted += n
+        stall = False
+        for it in r.get("items", []):
+            # _report_prepared와 같은 기준으로 판정한다. apply 하위의 error를
+            # 안 보면(예전 코드가 그랬다) RecipeError 같은 실패가 성공으로
+            # 잡혀 목표에 못 미친 채 "목표 도달"로 잘못 멈춘다 — 실측으로 잡음
+            # (공고 9, RecipeError인데 최초 코드는 ok=True로 셌다).
+            apply_err = (it.get("apply") or {}).get("error")
+            ok = not (it.get("error") or it.get("stopped") or apply_err)
+            if ok:
+                prepared += 1
+            items.append({"job_id": it["job_id"], "company": it.get("company"), "ok": ok})
+            # 실패한 건이 24시간 스킵 보호를 못 받는 경우(빌드 자체가 조기에
+            # 죽어 resume_builds에 안 남는 경우)가 있다 — 그러면 next_targets가
+            # 같은 job_id를 계속 다시 준다. 같은 id가 두 번 나오면 무한루프
+            # 신호이므로 즉시 멈춘다. 대기열 소진과 달리 이건 "고장"이다.
+            if it["job_id"] in seen_ids:
+                log.warning("night-cycle: 공고 %s가 반복돼 멈춘다 (24시간 스킵 실패로 추정)",
+                            it["job_id"])
+                stall = True
+            seen_ids.add(it["job_id"])
+        if stall:
+            break
+
+    # 자기개선은 더는 시간이 되면 자동으로 안 돈다 — 문제가 자체진단됐을 때만.
+    # LLM 호출 없는 DB 조회라 매번 불러도 싸다. 실제로 뭔가 있을 때만
+    # improve(코딩 에이전트)를 별도 프로세스로 띄운다 — 여기서 기다리면
+    # night-cycle 자체가 브랜치 작업 시간만큼 늘어진다.
+    self_diagnosed: list[str] = []
+    try:
+        from src.autoapply import orchestrator
+        conn = _connect()
+        try:
+            self_diagnosed = [it["title"] for it in orchestrator.self_items(conn)]
+        finally:
+            conn.close()
+        if self_diagnosed:
+            log.info("night-cycle: 자체진단 %d건 — improve 호출", len(self_diagnosed))
+            import subprocess
+            from src.autoapply.paths import CODE_ROOT
+            subprocess.Popen(
+                [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "improve", "--limit", "1"],
+                cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("자체진단 확인 실패(무시): %s", e)
+
+    return {
+        "target": target,
+        "prepared": prepared,
+        "attempted": attempted,
+        "stopped_reason": "목표 도달" if prepared >= target else "대기열 소진",
+        "scraped": scraped,
+        "health_findings": findings,
+        "self_diagnosed": self_diagnosed,
+        "items": items,
+    }
 
 
 def _cycle_apply(limit: int, *, defer: bool = False) -> dict:

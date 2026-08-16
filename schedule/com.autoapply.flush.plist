@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  아침 알림 일괄 발송 (launchd)
+
+  09:00에 한 번 깨어나 run.sh flush를 부른다. 새벽 동안 pending_notifications에
+  쌓인 지원 준비 알림(사진+버튼)을 순서대로 보낸다(cli.py flush-notify).
+
+  02:00(com.autoapply.night)과 분리한 이유: 새벽엔 알림을 안 보내고 만들기만
+  해야 자는 동안 폰이 안 울린다. 만드는 시각과 보내는 시각이 다르므로
+  launchd 잡도 둘로 가른다 — 하나의 잡이 "몇 시냐"로 스스로 갈라 타면
+  그 판단이 또 어긋날 수 있다.
+
+  설치: schedule/install.sh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.autoapply.flush</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/schedule/run.sh</string>
+        <string>flush</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>9</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/logs/flush.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/logs/flush.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+</dict>
+</plist>

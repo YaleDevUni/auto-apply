@@ -58,8 +58,12 @@ HELP = (
     "/revlog              목록\n"
     "/revlog edit N 내용  N번을 고친다\n"
     "/revlog delete N     N번을 지운다\n\n"
+    "<b>수동 실행 (언제든, 스케줄 무관)</b>\n"
+    "/지원시작 [건수]     수집→지원준비를 지금 바로. 기본 1건\n"
+    "/improve             개발 지시 큐 + 자체진단을 지금 처리\n\n"
     "<b>개발 지시</b>\n"
-    "그 외 아무 말이나 보내면 개발 큐에 쌓입니다.\n"
+    "그 외 아무 말이나 보내면 개발 큐에 쌓입니다. 자동으로는 안 돌고, "
+    "문제가 자체진단됐거나 <code>/improve</code>를 눌러야 처리됩니다.\n"
     "브랜치에만 커밋되고 main에는 안 닿습니다."
 )
 
@@ -248,6 +252,54 @@ def _cmd_revlog(conn: sqlite3.Connection, rest: str) -> str:
     )
 
 
+# ── 수동 트리거 (스케줄 무관, 사람이 부를 때만) ──────────────────────
+
+def _cmd_apply_start(conn: sqlite3.Connection, rest: str) -> str:
+    """언제든 사람이 부르면 그 자리에서 수집→지원준비를 돌린다.
+
+    새벽 자동 루프와 같은 `night-cycle`을 쓰지만 즉시 알림 모드다 — 깨어있을
+    때 직접 부른 것이므로 9시까지 미룰 이유가 없다. 건당 브라우저를 띄우고
+    이력서를 조립하므로 수 분 걸린다. 서브프로세스로 돌려 수신 루프를 막지
+    않는다(`/guide`와 같은 이유).
+    """
+    n = rest.strip()
+    target = int(n) if n.isdigit() else 1
+    if n and not n.isdigit():
+        return "사용법: <code>/지원시작 [건수]</code>  (숫자만, 생략하면 1건)"
+
+    import subprocess
+
+    from ..paths import CODE_ROOT
+
+    subprocess.Popen(
+        [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "night-cycle", "--target", str(target)],
+        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+    )
+    return (
+        f"🚀 지원 준비를 시작합니다 — 목표 {target}건.\n"
+        "<i>수집 → 판정 → 조립까지, 건당 수 분씩 걸립니다. 준비되는 대로 "
+        "바로바로 사진을 보내드립니다.</i>"
+    )
+
+
+def _cmd_improve(conn: sqlite3.Connection, rest: str) -> str:
+    """개발 지시 큐 + 자체진단을 지금 처리한다.
+
+    더는 시간이 되면 자동으로 안 돈다 — 문제가 자체진단됐을 때(새벽 루프 끝)
+    아니면 이 명령으로 사람이 부를 때만 돈다. 큐에 쌓아둔 지시(자유 텍스트로
+    보낸 것)도 이 명령을 눌러야 실제로 처리가 시작된다.
+    """
+    import subprocess
+
+    from ..paths import CODE_ROOT
+
+    subprocess.Popen(
+        [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "improve", "--limit", "1"],
+        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+    )
+    return "🔧 자기개선을 시작합니다 — 전용 브랜치에서 작업하고 끝나면 알려드립니다."
+
+
 COMMANDS: dict[str, Callable[[sqlite3.Connection], str]] = {
     "/status": _cmd_status,
     "/quota": _cmd_quota,
@@ -271,6 +323,10 @@ def _handle(conn: sqlite3.Connection, text: str) -> str:
         return _cmd_guide(conn, stripped[len(cmd):].strip())
     if cmd == "/revlog":
         return _cmd_revlog(conn, stripped[len(cmd):].strip())
+    if cmd in ("/지원시작", "/apply_start"):
+        return _cmd_apply_start(conn, stripped[len(cmd):].strip())
+    if cmd == "/improve":
+        return _cmd_improve(conn, stripped[len(cmd):].strip())
 
     if cmd in COMMANDS:
         try:
@@ -299,8 +355,8 @@ def _handle(conn: sqlite3.Connection, text: str) -> str:
     conn.commit()
     return (
         f"📥 개발 지시 #{cur.lastrowid} 접수.\n"
-        "다음 실행 때 <b>전용 브랜치</b>에서 작업하고 결과를 알려드립니다. "
-        "main에는 닿지 않습니다."
+        "자동으로는 안 돕니다 — <code>/improve</code>를 보내면 그때 "
+        "<b>전용 브랜치</b>에서 작업하고 결과를 알려드립니다. main에는 닿지 않습니다."
     )
 
 

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  새벽 수집·지원준비 (launchd)
+
+  02:00에 한 번 깨어나 run.sh night를 부른다. 수집 → 지원준비를 목표
+  30건이거나 대기열이 소진될 때까지 반복하고(cli.py night-cycle), 알림은
+  안 보낸다 — com.autoapply.flush(09:00)가 몰아서 보낸다.
+
+  하루 한 번인 이유: 같은 새벽 시간대엔 새 공고가 계속 올라오지 않는다.
+  여러 번 깨워봐야 같은 대기열을 다시 보는 것뿐이다.
+
+  RunAtLoad를 끈 이유: 맥북을 열 때마다 돌면 예측이 안 된다.
+  맥이 잠들어 02:00을 놓치면 launchd가 깨어난 직후 한 번 실행해 준다.
+
+  설치: schedule/install.sh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.autoapply.night</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/schedule/run.sh</string>
+        <string>night</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>2</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/logs/night.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/logs/night.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+</dict>
+</plist>
