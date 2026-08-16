@@ -18,7 +18,7 @@ import json
 import logging
 import sys
 
-from src.autoapply import agent, pipeline
+from src.autoapply import agent, pipeline, tasks
 from src.autoapply.adapters import REGISTRY
 from src.autoapply.db import connect, now
 from src.autoapply.notify import telegram
@@ -174,6 +174,42 @@ def main() -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr
     )
 
+    # 오래 도는 명령만 '지금 도는 작업'으로 등록한다. 폰에서 /running으로 보고
+    # /stop으로 멈출 수 있는 대상이 이 목록이다. 짧게 끝나는 조회 명령까지
+    # 넣으면 목록이 순간 쓰레기로 차서 정작 볼 것을 못 본다.
+    kind = _TASK_KINDS.get(args.cmd)
+    if kind:
+        with tasks.running(kind, _task_label(args)):
+            return _dispatch(args)
+    return _dispatch(args)
+
+
+# 명령 → 사람이 읽을 이름. /running·/stop 메시지에 그대로 나간다.
+_TASK_KINDS = {
+    "scrape": "공고수집",
+    "night-cycle": "지원준비",
+    "cycle-apply": "지원준비",
+    "autoapply": "지원준비",
+    "submit": "제출",
+    "apply": "지원 폼 실행",
+    "improve": "자기개선",
+    "revise": "이력서 재작성",
+    "resumes": "이력서 정리",
+    "reevaluate": "재판정",
+}
+
+
+def _task_label(args: argparse.Namespace) -> str:
+    if getattr(args, "job_id", None) is not None:
+        return f"공고 {args.job_id}"
+    if getattr(args, "target", None) is not None:
+        return f"목표 {args.target}건"
+    if getattr(args, "platform", None):
+        return ",".join(args.platform)
+    return ""
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.cmd == "scrape":
         session_ok = {}
         if args.check_session:
@@ -184,14 +220,23 @@ def main() -> int:
         for item in args.session:
             k, _, v = item.partition("=")
             session_ok[k.strip()] = v.strip() not in ("0", "false", "no", "")
-        _out(pipeline.run_all(args.platform, session_ok or None))
+        results = pipeline.run_all(args.platform, session_ok or None)
+        _out(results)
         agent.notify_login_required()  # 세션 끊긴 플랫폼이 있으면 알린다 (쿨다운 적용)
 
-        from src.autoapply import health
+        # 중간에 멈춘 수집으로는 건강을 판정하지 않는다. 상세를 덜 받았으니
+        # NO_DETAIL이 통과분을 지배하고, actionable도 같이 주저앉는다 —
+        # 전부 "중단했으니 당연한" 값인데 경보는 "망가졌다"고 폰에 울린다.
+        # 실측(2026-08-16): 22건에서 멈춘 수집이 "NO_DETAIL이 통과분의 78%"
+        # 경보를 띄웠다.
+        if any(r.get("stopped") for r in results):
+            print("⏹ 중단된 수집이라 건강 판정은 건너뛴다", file=sys.stderr)
+        else:
+            from src.autoapply import health
 
-        result = health.run()  # 조용히 망가진 게 있으면 알린다
-        for f in result.get("findings", []):
-            print(f"⚠️  {f['message']}", file=sys.stderr)
+            result = health.run()  # 조용히 망가진 게 있으면 알린다
+            for f in result.get("findings", []):
+                print(f"⚠️  {f['message']}", file=sys.stderr)
     elif args.cmd == "reevaluate":
         _out(pipeline.reevaluate())
     elif args.cmd == "targets":
@@ -355,7 +400,14 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
 
     prepared, attempted, items = 0, 0, []
     seen_ids: set[int] = set()
+    stopped_by_human = False
     while prepared < target:
+        # 건과 건 사이가 접기 좋은 자리다. 한 건은 이력서 등록까지 묶여 있어
+        # 중간에 끊으면 절반만 채워진 이력서가 계정에 남는다.
+        if tasks.cancelled():
+            stopped_by_human = True
+            log.warning("night-cycle: 중단 요청 — %d/%d 준비하고 멈춘다", prepared, target)
+            break
         r = _cycle_apply(1, defer=defer)
         n = r.get("prepared", 0)
         if n == 0:
@@ -409,11 +461,17 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("자체진단 확인 실패(무시): %s", e)
 
+    if stopped_by_human:
+        reason = "중단됨(사람 요청)"
+    elif prepared >= target:
+        reason = "목표 도달"
+    else:
+        reason = "대기열 소진"
     return {
         "target": target,
         "prepared": prepared,
         "attempted": attempted,
-        "stopped_reason": "목표 도달" if prepared >= target else "대기열 소진",
+        "stopped_reason": reason,
         "self_diagnosed": self_diagnosed,
         "items": items,
     }
@@ -1069,6 +1127,14 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except SystemExit:
         raise
+    except tasks.Cancelled as e:  # 사람이 멈춘 것 — 고장이 아니다
+        try:
+            _tell(f"⏹ <b>중단</b> — <code>{html.escape(' '.join(sys.argv[1:])[:100])}</code>\n"
+                  f"<i>{html.escape(str(e)[:200])}</i>")
+        except Exception:  # noqa: BLE001
+            pass
+        print(json.dumps({"cancelled": str(e)}, ensure_ascii=False, indent=2))
+        raise SystemExit(0) from None
     except Exception as e:  # 브라우저 경합은 고장이 아니다 — 안내하고 조용히 끝낸다
         from src.autoapply.runner.lock import BrowserBusy
 

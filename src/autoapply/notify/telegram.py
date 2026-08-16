@@ -102,6 +102,8 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("quota", "오늘 남은 지원 한도"),
     ("blocked", "막힌 이유"),
     ("targets", "지원 대기열"),
+    ("running", "지금 도는 작업"),
+    ("stop", "도는 작업 중단 (강제: /stop 강제)"),
     ("apply", "지원준비를 지금 바로 (수집은 낮 12시에 따로)"),
     ("improve", "개발 지시 큐 + 자체진단을 지금 처리"),
     ("pause", "자동지원 정지"),

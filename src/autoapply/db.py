@@ -292,6 +292,25 @@ CREATE TABLE IF NOT EXISTS pending_notifications (
     sent_at    TEXT
 );
 
+-- 지금 도는 긴 작업. 수집·지원준비·제출은 전부 별도 프로세스라(수신 루프를
+-- 막지 않으려고 Popen으로 띄운다) 서로의 존재를 모른다. 이 표가 유일한
+-- 만남의 장소다 — /running이 여기를 읽고, /stop이 여기에 표시를 남긴다.
+--
+-- 죽이는 대신 표시하는 이유: 브라우저를 반쯤 만진 채 끊기면 절반만 채워진
+-- 이력서가 계정에 남는다. 각 루프가 안전한 경계에서 cancel_at을 보고 스스로
+-- 접는다(tasks.check()).
+CREATE TABLE IF NOT EXISTS running_tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,          -- 수집 | 지원준비 | 제출 | 자기개선 ...
+    label       TEXT,                   -- 공고 번호 등 사람이 알아볼 꼬리표
+    pid         INTEGER NOT NULL,
+    started_at  TEXT NOT NULL,
+    cancel_at   TEXT,                   -- 중단 요청 시각. 있으면 루프가 스스로 접는다
+    finished_at TEXT,
+    status      TEXT                    -- done | cancelled | failed | vanished
+);
+CREATE INDEX IF NOT EXISTS idx_running_open ON running_tasks(finished_at);
+
 -- ─────────────────────── 에이전트 조회면 ───────────────────────
 
 -- 에이전트는 이 뷰 하나만 읽는다. 다섯 테이블을 머릿속에서 JOIN하게 하지 않는다.
@@ -475,13 +494,26 @@ def upsert_job(conn: sqlite3.Connection, job: dict[str, Any]) -> tuple[int, str]
         )
         return cur.lastrowid, "inserted"
 
+    # 본문은 **빈 값으로 덮어쓰지 않는다.**
+    #
+    # 본문은 목록 API에 없고 상세 조회에서만 온다. 그런데 저장 루프는 상세를
+    # 받았든 못 받았든 전체를 훑는다 — 상세를 못 받은 공고는 description=''인
+    # 채로 여기 오고, 예전에 받아둔 본문을 그대로 지웠다.
+    #
+    # 실측(2026-08-16): 수집을 중간에 멈추자(상세 4건만 조회) 그 한 번으로
+    # actionable이 16 → 3으로 주저앉았다. 본문이 사라지면 판정은 NO_DETAIL로
+    # 막고, 이력서 조립은 읽을 공고가 없어진다. detail_limit(기본 800)을 넘긴
+    # 공고에도 늘 같은 일이 일어나고 있었다 — 중단 기능이 그걸 크게 만들어
+    # 드러냈을 뿐이다.
     conn.execute(
         """UPDATE jobs SET url=?, company=?, company_norm=?, title=?, title_norm=?,
              category=?, location=?, employment_type=?, experience_req=?, education_req=?,
-             salary=?, deadline=?, posted_at=?, description=?, image_url=?, image_path=?,
+             salary=?, deadline=?, posted_at=?,
+             description=CASE WHEN ?<>'' THEN ? ELSE description END,
+             image_url=?, image_path=?,
              raw_json=?, content_hash=?, canonical_key=?, last_seen_at=?
            WHERE id=?""",
-        (*fields, ts, row["id"]),
+        (*fields[:13], fields[13], fields[13], *fields[14:], ts, row["id"]),
     )
     return row["id"], "updated"
 

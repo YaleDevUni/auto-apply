@@ -30,6 +30,7 @@ from .db import (
 from .http import Fetcher
 from .paths import RECIPE_DIR
 from .screening import evaluate_applicability, screen
+from . import tasks
 
 
 def _gap_counts(conn) -> dict[int, int]:
@@ -68,9 +69,22 @@ def run_platform(
         ) as fetcher:
             adapter: Adapter = adapter_cls(fetcher, cfg)
 
+            # 중단은 **여기서 던지지 않고 표시만 남긴다.** 예외로 튀어나가면
+            # 이미 받아둔 공고가 통째로 버려진다 — 수 분을 들여 받은 것을
+            # 버리는 건 중단의 목적이 아니다. 받은 데까지는 저장하고 접는다.
+            stopped = False
+
             # --- 1차: 목록 데이터만으로 판정 ---
+            #
+            # 중단 확인은 **건 사이**에서만 한다. 요청 하나를 반쯤 받은 채로
+            # 접으면 그 공고는 있지도 없지도 않은 상태가 된다.
             staged: list[tuple[JobPosting, dict[str, Any]]] = []
             for job in adapter.fetch():
+                if tasks.cancelled():
+                    stopped = True
+                    log.warning("[%s] 중단 요청 — 목록 수집을 %d건에서 멈춘다",
+                                platform, counts["found"])
+                    break
                 counts["found"] += 1
                 staged.append((job, screen(job, cfg)))
 
@@ -83,8 +97,14 @@ def run_platform(
 
             # --- 2차: 통과분만 상세 조회 ---
             enrich = getattr(adapter, "enrich", None)
-            if enrich and s.get("fetch_detail", True):
-                for job, _ in passed[: s.get("detail_limit", 120)]:
+            if not stopped and enrich and s.get("fetch_detail", True):
+                for n, (job, _) in enumerate(passed[: s.get("detail_limit", 120)]):
+                    # 여기가 제일 긴 구간이다(상세 800건 = 수 분~수십 분).
+                    # 중단을 눌렀을 때 실제로 멈추는 자리도 대개 여기다.
+                    if tasks.cancelled():
+                        stopped = True
+                        log.warning("[%s] 중단 요청 — 상세 조회를 %d건에서 멈춘다", platform, n)
+                        break
                     try:
                         enrich(job)
                     except Exception as exc:  # noqa: BLE001
@@ -93,6 +113,9 @@ def run_platform(
                         )
 
             # --- 저장 + 지원가능성 판정 ---
+            # 중단됐어도 **여기는 끝까지 돈다.** 네트워크는 이미 다 쓴 뒤라
+            # 남은 건 로컬 판정뿐이고(수천 건이어도 초 단위), 저장을 건너뛰면
+            # 받아온 것이 전부 사라진다.
             for job, first in staged:
                 final = screen(job, cfg) if job.description else first
                 job_id, action = upsert_job(conn, job.to_db())
@@ -112,6 +135,8 @@ def run_platform(
                     counts["actionable"] += 1
 
             conn.commit()
+            if stopped:
+                error = "중단됨(사람 요청) — 받은 데까지 저장"
 
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
@@ -119,7 +144,8 @@ def run_platform(
 
     finish_run(conn, run_id, **counts, error=error)
     conn.close()
-    return {"platform": platform, **counts, "error": error}
+    return {"platform": platform, **counts, "error": error,
+            "stopped": bool(error and error.startswith("중단됨"))}
 
 
 def run_all(

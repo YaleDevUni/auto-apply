@@ -48,7 +48,9 @@ HELP = (
     "/quota   오늘 남은 지원 한도\n"
     "/blocked 막힌 이유\n"
     "/targets 지원 대기열\n"
-    "/pause   자동지원 정지\n"
+    "/running 지금 도는 작업 (브라우저를 누가 쥐고 있는지도)\n"
+    "/stop    도는 작업 중단 요청 (안 멈추면 <code>/stop 강제</code>)\n"
+    "/pause   자동지원 정지 (도는 작업은 안 건드림 — 그건 /stop)\n"
     "/resume  재개\n"
     "/queue   개발 지시 큐\n\n"
     "<b>작성 가이드 (Opus 5가 편집)</b>\n"
@@ -140,6 +142,54 @@ def _cmd_targets(conn) -> str:
         return "지원 대기열이 비어 있습니다."
     return "지원 대기열\n" + "\n".join(
         f"· {t['fit_score']}점 {t['company'][:14]} — {t['title'][:26]}" for t in ts
+    )
+
+
+def _cmd_running(conn) -> str:
+    """지금 도는 긴 작업. 브라우저를 누가 쥐고 있는지도 같이 본다 —
+    "왜 지원 버튼이 안 먹지"의 답이 대개 여기 있다."""
+    from ..runner.lock import describe as lock_desc, holder
+    from ..tasks import active, describe
+
+    rows = active(conn)
+    lines = ["작업이 없습니다."] if not rows else [f"· {describe(t)}" for t in rows]
+    who = holder()
+    lines.append(
+        f"\n🔒 브라우저: {lock_desc(who)}" if who else "\n🔒 브라우저: 비어 있음"
+    )
+    return "<b>지금 도는 작업</b>\n" + "\n".join(lines) + (
+        "\n\n멈추려면 <code>/stop</code>" if rows else ""
+    )
+
+
+def _cmd_stop(conn: sqlite3.Connection, rest: str) -> str:
+    """도는 작업에 중단을 요청한다.
+
+    죽이지 않고 표시만 남기는 게 기본이다 — 브라우저를 반쯤 만진 채 끊기면
+    절반만 채워진 이력서가 계정에 남는다. 각 루프가 안전한 경계(공고 한 건이
+    끝난 자리)에서 표시를 보고 스스로 접는다. 그래서 즉시 멎지 않는다:
+    수집은 공고 한 건, 지원준비는 준비 한 건만큼 늦게 멈춘다.
+
+    그래도 안 멈추면 `/stop 강제` — SIGTERM을 보낸다. 그 자리에서 끊기므로
+    만들다 만 이력서가 남을 수 있다.
+    """
+    from ..tasks import describe, request_stop
+
+    force = rest.strip() in ("강제", "force", "kill", "-f")
+    stopped = request_stop(conn, force=force)
+    if not stopped:
+        return "도는 작업이 없습니다. (<code>/pause</code>는 자동지원 자체를 멈춥니다)"
+
+    lines = "\n".join(f"· {describe(t)}" for t in stopped)
+    if force:
+        return (
+            f"⛔️ <b>강제 종료 신호를 보냈습니다</b> ({len(stopped)}건)\n{lines}\n\n"
+            "<i>만들다 만 이력서가 남았을 수 있습니다 — /running 으로 확인하세요.</i>"
+        )
+    return (
+        f"⏹ <b>중단을 요청했습니다</b> ({len(stopped)}건)\n{lines}\n\n"
+        "<i>지금 하던 한 건을 끝내고 멈춥니다. 받은 데까지는 저장됩니다.\n"
+        "안 멈추면 <code>/stop 강제</code>.</i>"
     )
 
 
@@ -321,6 +371,7 @@ COMMANDS: dict[str, Callable[[sqlite3.Connection], str]] = {
     "/quota": _cmd_quota,
     "/blocked": _cmd_blocked,
     "/targets": _cmd_targets,
+    "/running": _cmd_running,
     "/pause": _cmd_pause,
     "/resume": _cmd_resume,
     "/queue": _cmd_queue,
@@ -343,6 +394,8 @@ def _handle(conn: sqlite3.Connection, text: str) -> str:
         return _cmd_apply_start(conn, stripped[len(cmd):].strip())
     if cmd == "/improve":
         return _cmd_improve(conn, stripped[len(cmd):].strip())
+    if cmd == "/stop":
+        return _cmd_stop(conn, stripped[len(cmd):].strip())
 
     # 명령어를 몰라서 그냥 "/"만 보내는 경우 — "모르는 명령입니다"를 앞세우지
     # 않고 바로 도움말을 보여준다. /help와 동작이 같다.
