@@ -910,37 +910,6 @@ def verify_screenshot(shot: str, data: dict[str, Any]) -> dict[str, Any]:
     return vision.verify(shot, intent, context="채용 플랫폼의 이력서 편집 화면")
 
 
-def record_registration(
-    job_id: int,
-    *,
-    resume_title: str,
-    resume_url: str = "",
-    skills: list[str] | None = None,
-    report: dict[str, Any] | None = None,
-    conn: sqlite3.Connection | None = None,
-) -> None:
-    """플랫폼에 등록된 결과를 기록한다.
-
-    지원 단계는 이 값으로 이력서를 고른다. 예전에는 편집기 화면에서 제목을
-    읽어 곧바로 넘겼는데, 그 자리의 문구가 상태에 따라 바뀌어
-    ("기본 이력서 설정" → "기본 이력서") 조립과 지원을 잇는 고리가 끊겼다.
-    한 번 기록해두면 그 뒤로는 화면 상태와 무관하다.
-    """
-    own = conn is None
-    conn = conn or connect()
-    try:
-        conn.execute(
-            """UPDATE resume_builds
-               SET resume_title=?, resume_url=?, skills=?
-               WHERE job_id=?""",
-            (resume_title, resume_url, json.dumps(skills or [], ensure_ascii=False), job_id),
-        )
-        conn.commit()
-    finally:
-        if own:
-            conn.close()
-
-
 def registered_title(job_id: int, conn: sqlite3.Connection | None = None) -> str:
     """이 공고로 등록해둔 이력서 제목. 없으면 빈 문자열."""
     own = conn is None
