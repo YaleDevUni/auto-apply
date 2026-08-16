@@ -262,6 +262,19 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at  TEXT NOT NULL
 );
 
+-- 새벽 루프가 만든 지원 준비 알림. 만드는 자리에서 바로 보내면 자는 동안
+-- 계속 폰이 울린다 — 그래서 여기 쌓아두고 flush가 9시에 순서대로 보낸다.
+-- 텔레그램으로 사람이 직접 부른 건(즉시 알림 모드) 이 표를 거치지 않는다.
+CREATE TABLE IF NOT EXISTS pending_notifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     INTEGER,
+    caption    TEXT NOT NULL,
+    photo_path TEXT,             -- NULL이면 사진 없이 텍스트만
+    buttons    TEXT,             -- JSON. NULL이면 버튼 없음
+    created_at TEXT NOT NULL,
+    sent_at    TEXT
+);
+
 -- ─────────────────────── 에이전트 조회면 ───────────────────────
 
 -- 에이전트는 이 뷰 하나만 읽는다. 다섯 테이블을 머릿속에서 JOIN하게 하지 않는다.

@@ -20,7 +20,7 @@ import sys
 
 from src.autoapply import agent, pipeline
 from src.autoapply.adapters import REGISTRY
-from src.autoapply.db import connect
+from src.autoapply.db import connect, now
 from src.autoapply.notify import telegram
 from src.autoapply.paths import describe
 
@@ -133,6 +133,11 @@ def main() -> int:
     cyc = sub.add_parser(
         "cycle-apply", help="대기열 상위 N건을 dry-run으로 준비한다 (제출 안 함)")
     cyc.add_argument("--limit", type=int, default=1)
+    cyc.add_argument(
+        "--defer", action="store_true",
+        help="알림을 바로 안 보내고 쌓아둔다. flush-notify가 나중에 보낸다")
+
+    sub.add_parser("flush-notify", help="쌓인 지원 준비 알림을 순서대로 보낸다")
 
     sbp = sub.add_parser(
         "submit", help="이미 등록된 이력서로 제출만 한다 (조립·입력 없음)")
@@ -286,7 +291,9 @@ def main() -> int:
     elif args.cmd == "autoapply":
         _out(_autoapply(args.job_id, resume_url=args.resume_url, live=args.live))
     elif args.cmd == "cycle-apply":
-        _out(_cycle_apply(args.limit))
+        _out(_cycle_apply(args.limit, defer=args.defer))
+    elif args.cmd == "flush-notify":
+        _out(_flush_notifications())
     elif args.cmd == "submit":
         _out(_submit(args.job_id))
     elif args.cmd == "apply":
@@ -294,7 +301,7 @@ def main() -> int:
     return 0
 
 
-def _cycle_apply(limit: int) -> dict:
+def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
     """대기열 상위 N건을 dry-run으로 준비한다.
 
     **cron에서는 절대 제출하지 않는다.** 이력서를 조립해 등록하고 지원 폼까지
@@ -303,7 +310,9 @@ def _cycle_apply(limit: int) -> dict:
 
     한 사이클에 기본 1건인 이유: 건당 브라우저를 띄우고 이력서를 조립하므로
     2분 안팎이 든다. 여러 건을 몰아 돌리면 사이클이 길어지고, 무엇보다
-    사람이 검토할 스크린샷이 한 번에 쌓여 실질 검토가 안 된다.
+    사람이 검토할 스크린샷이 한 번에 쌓여 실질 검토가 안 된다. `night-cycle`은
+    이 한계를 limit=1로 여러 번 부르는 식으로 우회하고, `defer=True`로
+    알림은 쌓아뒀다가 나중에 한 번에 보낸다.
     """
     from src.autoapply.db import connect as _connect
     from src.autoapply.notify.listener import is_paused
@@ -335,7 +344,7 @@ def _cycle_apply(limit: int) -> dict:
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
-        _report_prepared(t, r, (r.get("resume") or {}).get("data"))
+        _report_prepared(t, r, (r.get("resume") or {}).get("data"), defer=defer)
     return {"prepared": len(out), "items": out}
 
 
@@ -366,12 +375,61 @@ def _remember_preview_resume(url: str) -> None:
         conn.close()
 
 
-def _report_prepared(target: dict, result: dict, data: dict | None = None) -> None:
-    """준비 결과를 폰으로 보낸다. 성공이면 **스크린샷**, 실패면 이유.
+def _queue_notification(
+    conn, *, job_id: int | None, caption: str, photo_path: str | None, buttons: list | None
+) -> None:
+    """지금 보내지 않고 쌓아둔다. `flush-notify`가 나중에 순서대로 보낸다."""
+    conn.execute(
+        "INSERT INTO pending_notifications (job_id, caption, photo_path, buttons, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (job_id, caption, photo_path, json.dumps(buttons) if buttons else None, now()),
+    )
+    conn.commit()
 
-    실패가 로그에만 남으면 아침에 로그를 뒤져야 안다 — 실제로 06시 사이클이
-    클릭 타임아웃으로 통째로 실패했는데 그렇게 발견했다. 무인 운영에서
-    "아무 일도 안 일어남"과 "망가져서 못 함"은 겉보기에 같다.
+
+def _flush_notifications() -> dict:
+    """쌓인 지원 준비 알림을 순서대로 보낸다. 새벽 루프가 만든 것을 아침에 한 번에 본다.
+
+    사진이 없으면 텍스트로만 보낸다 — `send_photo`가 실패(파일 삭제 등)해도
+    캡션은 반드시 도착해야 무엇이 있었는지 안다.
+    """
+    from src.autoapply.notify import telegram
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM pending_notifications WHERE sent_at IS NULL ORDER BY id"
+        ).fetchall()
+        sent = 0
+        for r in rows:
+            buttons = json.loads(r["buttons"]) if r["buttons"] else None
+            ok = bool(
+                r["photo_path"]
+                and telegram.send_photo(conn, r["photo_path"], r["caption"], buttons)
+            )
+            if not ok:
+                telegram.notify(conn, r["caption"])
+            conn.execute(
+                "UPDATE pending_notifications SET sent_at=? WHERE id=?", (now(), r["id"])
+            )
+            sent += 1
+        conn.commit()
+        if sent:
+            telegram.notify(conn, f"🌙 새벽 사이에 {sent}건 준비됐습니다 — 위에서부터 검토해주세요.")
+        return {"sent": sent}
+    finally:
+        conn.close()
+
+
+def _report_prepared(
+    target: dict, result: dict, data: dict | None = None, *, defer: bool = False
+) -> None:
+    """준비 결과를 폰으로 보낸다(또는 defer=True면 나중에 보낼 큐에 쌓는다).
+
+    성공이면 **스크린샷**, 실패면 이유. 실패가 로그에만 남으면 아침에 로그를
+    뒤져야 안다 — 실제로 06시 사이클이 클릭 타임아웃으로 통째로 실패했는데
+    그렇게 발견했다. 무인 운영에서 "아무 일도 안 일어남"과 "망가져서 못 함"은
+    겉보기에 같다.
     """
     from src.autoapply.db import connect as _c
     from src.autoapply.notify import telegram
@@ -383,7 +441,14 @@ def _report_prepared(target: dict, result: dict, data: dict | None = None) -> No
         err = result.get("error") or apply_res.get("error") or result.get("stopped")
 
         if err:
-            telegram.notify(conn, f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{str(err)[:200]}</i>")
+            caption = f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{str(err)[:200]}</i>"
+            if defer:
+                _queue_notification(
+                    conn, job_id=target.get("job_id"), caption=caption,
+                    photo_path=None, buttons=None,
+                )
+            else:
+                telegram.notify(conn, caption)
             return
 
         # 폰으로 보내는 사진은 **제출될 이력서 내용**이어야 한다.
@@ -447,7 +512,12 @@ def _report_prepared(target: dict, result: dict, data: dict | None = None) -> No
                 {"text": "✏️ 수정요청", "callback_data": f"revise:{target['job_id']}"},
             ],
         ]
-        if not (shot and telegram.send_photo(conn, shot, caption, buttons)):
+        if defer:
+            _queue_notification(
+                conn, job_id=target.get("job_id"), caption=caption, photo_path=shot,
+                buttons=buttons,
+            )
+        elif not (shot and telegram.send_photo(conn, shot, caption, buttons)):
             telegram.notify(conn, caption)
     finally:
         conn.close()
