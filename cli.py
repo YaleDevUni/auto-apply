@@ -238,7 +238,9 @@ def _cycle_apply(limit: int) -> dict:
     try:
         if is_paused(conn):
             return {"skipped": "일시정지 상태 (텔레그램 /resume 으로 해제)"}
-        targets = agent.next_targets(limit, conn)
+        # 최근 준비한 공고는 건너뛴다. dry-run은 선점하지 않으므로 이게 없으면
+        # 매 사이클 같은 1위만 다시 준비하고 대기열이 줄지 않는다.
+        targets = agent.next_targets(limit, conn, skip_prepared_hours=24)
     finally:
         conn.close()
 

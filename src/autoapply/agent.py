@@ -32,18 +32,36 @@ from .screening import summarize_blockers
 log = logging.getLogger(__name__)
 
 
-def next_targets(limit: int = 10, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+def next_targets(
+    limit: int = 10,
+    conn: sqlite3.Connection | None = None,
+    *,
+    skip_prepared_hours: float = 0,
+) -> list[dict[str, Any]]:
     """지금 자동지원 가능한 공고를 급한 순으로 돌려준다.
 
     정렬은 점수순이 아니라 (마감임박 → 점수) 순이다. 오늘 밤 닫히는 95점짜리가
     상시채용 130점짜리보다 급하다 — 후자는 내일도 있다.
+
+    skip_prepared_hours — 최근 그 시간 안에 이력서를 조립해본 공고는 뺀다.
+    dry-run 준비는 선점(claim)을 하지 않으므로, 이게 없으면 사이클마다 같은
+    1위만 계속 준비하고 대기열이 소진되지 않는다. 실측: 인졀미가 세 사이클
+    연속으로 준비됐다.
     """
     own = conn is None
     conn = conn or connect()
     try:
-        rows = conn.execute(
-            "SELECT * FROM v_actionable LIMIT ?", (limit,)
-        ).fetchall()
+        if skip_prepared_hours:
+            rows = conn.execute(
+                """SELECT v.* FROM v_actionable v
+                   LEFT JOIN resume_builds b ON b.job_id = v.job_id
+                   WHERE b.job_id IS NULL
+                      OR (julianday('now') - julianday(b.built_at)) * 24 > ?
+                   LIMIT ?""",
+                (skip_prepared_hours, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM v_actionable LIMIT ?", (limit,)).fetchall()
         out = rows_to_dicts(rows)
         for r in out:
             r["blockers"] = json.loads(r.get("blockers") or "[]")
