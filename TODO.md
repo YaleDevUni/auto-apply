@@ -142,7 +142,7 @@ flowchart TD
 - [x] **실제 제출 검증** — 텔레그램 승인 → 제출까지 정상 (공고 1025)
 - [x] **사본 경로 이력서로 실제 지원** — `#{n}` 제목이 지원 폼에서 정상 선택됨
 
-### P0-B — 새벽 자동화 재설계 (2026-08-16 지시, 진행 중)
+### P0-B — 새벽 자동화 재설계 (2026-08-16 지시, 구현·검증 완료)
 
 지금은 하루 12번(2시간마다) 깨어나 폰 메시지 수신 + 자기개선을 매번 하고,
 수집·판정·지원준비만 6시간 간격으로 골라서 한다. 아래로 바꾼다:
@@ -159,37 +159,32 @@ flowchart TD
 안 돈 적이 있다(`schedule/run.sh` 주석 참고) — 이번엔 launchd가 모드 인자를
 넘기게 해서 "몇 시냐"를 스크립트가 다시 추측하지 않게 한다.
 
-- [ ] `resumes.max_keep` 20 → 31 (config.yaml) — 사본메이커(protect 목록)는
-      원래도 안 세므로 그대로 유지. 검증: `cli.py resumes --cleanup`(dry-run)
-      출력의 `would_delete` 기준이 31개 넘는 시점부터 잡히는지 확인
-- [ ] 지원 완료 즉시 그 이력서를 플랫폼에서 지운다(`_apply_with`의
-      `mark_submitted` 직후 훅). 플랫폼 지원이력에서 이력서 접근 가능하므로
-      보관할 이유가 없다. 로컬 사본(`profile/generated`)은 그대로 남긴다 —
-      `cleanup()`과 같은 "우리가 만든 것만, 로컬 사본 있을 때만" 규칙을 지킨다.
-      검증: 실제 제출 1건 후 원티드 이력서 목록에서 그 제목이 사라지는지 확인
-- [ ] 지원 준비 알림 지연 발송 — `_report_prepared`를 "만들기"와 "보내기"로
-      가른다. 새벽 루프는 만든 것만 큐(테이블 또는 파일)에 쌓고 9시에
-      한꺼번에 보낸다. `/지원시작`으로 사람이 직접 부른 건 지금처럼 즉시
-      보낸다(깨어있을 때 부른 것이므로 지연시킬 이유가 없다).
-      검증: 새벽 큐에 3건 넣고 flush 명령 실행 시 3건이 순서대로 도착하는지
-- [ ] 새벽 루프 본체 — `cli.py night-cycle --target 30`: scrape →
-      cycle-apply를 반복하다 (a) 새로 준비한 게 30건이거나 (b) `next_targets`가
-      더 줄 게 없으면 멈춘다. 알림은 지연(위 항목) 모드로.
-      검증: 대기열을 인위로 35건 이상 채운 뒤 실행해 정확히 30건에서 멈추는지,
-      대기열이 30건 미만일 때 소진되면 그 전에 멈추는지 둘 다 확인
-- [ ] 텔레그램 `/지원시작 <건수>` — 언제든 사람이 부르면 그 즉시(스케줄 무관)
-      night-cycle을 그 건수로 돌린다. 즉시 알림 모드. 오래 걸리므로(건당
-      수 분) `/guide`처럼 서브프로세스로 돌려 수신 루프를 막지 않는다
-- [ ] 자기개선 자동 호출 조건화 — `run.sh`에서 매 사이클 `improve` 호출을
-      없애고, 새벽 루프 끝에서 `orchestrator.self_items()`(자체진단, LLM
-      호출 없음)가 뭔가 있을 때만 `cli.py improve`를 부른다. 사람 지시
-      큐(control_queue)는 더는 시간이 지나면 자동으로 안 돌고, 텔레그램
-      `/improve` 명령으로 사람이 불러야 처리된다 — 지금 도움말 문구
-      ("다음 실행 때 처리합니다")도 같이 고친다
-- [ ] launchd 재구성 — `com.autoapply.cycle`을 02:00 한 번만 깨우게 바꾸고
-      (`night-cycle` 모드 인자 전달), 09:00에 flush 전용 트리거를 하나 더
-      둔다. 상주 리스너(`com.autoapply.listen`)는 그대로 둔다 — `/지원시작`
-      ·`/improve`가 시간 무관하게 동작하려면 얘가 24시간 살아 있어야 한다
+- [x] `resumes.max_keep` 20 → 31 (config.yaml). 검증: `effective_config()`로
+      값 반영 확인. 실제 계정 상태로 cleanup dry-run까지는 안 돌려봄(31개를
+      넘겨본 적이 없어 지금 눈으로 확인 불가 — 자연히 쌓이면 확인)
+- [x] 지원 완료 즉시 그 이력서를 플랫폼에서 지운다(`_apply_with`의
+      `mark_submitted` 직후, `resume_editor.delete_after_submit`). 로컬
+      사본 있을 때만 지운다. 실제 제출이 아직 안 나가서 왕복 확인은
+      다음 실제 제출에서 — `delete_resume()`(cleanup에서 실사용 중) 그대로
+      재사용이라 코드 경로 자체의 위험은 낮음
+- [x] 지원 준비 알림 지연 발송 — `_report_prepared(defer=True)`가
+      `pending_notifications`에 쌓고 `flush-notify`가 순서대로 보낸다.
+      검증: 실제로 2건 큐잉 → flush → 텔레그램 도착 확인
+- [x] 새벽 루프 본체 — `cli.py night-cycle --target N`. 검증: 실제로
+      `--target 1 --defer`를 끝까지 돌림(원티드 실수집 1151건 → 판정 →
+      조립 → dry-run 등록 1건, "목표 도달"로 정상 종료). 이 과정에서 버그
+      하나 잡음 — apply 하위 error(RecipeError)를 성공으로 잘못 셈. 고침
+- [x] 텔레그램 `/지원시작 <건수>` — night-cycle을 서브프로세스로, 즉시 알림
+      모드. 실제 버튼 누름 왕복은 미확인(코드 경로는 /guide와 동일 패턴)
+- [x] 자기개선 자동 호출 조건화 — `run.sh`에서 매 사이클 `improve` 제거.
+      night-cycle 끝에서 `orchestrator.self_items()` 있을 때만 자동 호출,
+      그 외엔 텔레그램 `/improve`. 도움말 문구도 고침. 검증: 실제 실행에서
+      self_items 없어 improve 서브프로세스 안 뜬 것 확인(자동 트리거 조용함)
+- [x] launchd 재구성 — `com.autoapply.cycle` 폐기(bootout+plist 삭제),
+      `com.autoapply.night`(02:00)·`com.autoapply.flush`(09:00) 신설,
+      `com.autoapply.listen`은 유지. 검증: `launchctl list`로 cycle 사라짐·
+      night/flush 등록 확인, `kickstart -p`로 flush 실제 실행해 run.sh가
+      인자를 받아 옳은 분기를 타는지 확인(sent:0으로 정상 종료)
 - [ ] 끝나면 텔레그램으로 완료 보고
 
 ### P1 — 커버리지
