@@ -508,12 +508,10 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
             conn.close()
         if self_diagnosed:
             log.info("night-cycle: 자체진단 %d건 — improve 호출", len(self_diagnosed))
-            import subprocess
             from src.autoapply.paths import CODE_ROOT
-            subprocess.Popen(
+            tasks.spawn(
                 [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "improve", "--limit", "1"],
-                cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        start_new_session=True,
+                log_name="improve",
             )
     except Exception as e:  # noqa: BLE001
         log.warning("자체진단 확인 실패(무시): %s", e)

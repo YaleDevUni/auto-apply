@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 import httpx
 
+from .. import tasks
 from ..db import get_setting, now, set_setting
 # 모듈째 들여온다. 이름만 가져오면(`from .telegram import notify`) 콜백 처리에서
 # 쓰는 `telegram.answer_callback`이 NameError로 죽는다 — 실제로 '건너뛰기'
@@ -346,7 +347,6 @@ def _cmd_guide(conn: sqlite3.Connection, rest: str) -> str:
     # Opus 5 호출은 수 분 걸릴 수 있어 별도 프로세스로 돌린다 — 수신 루프가
     # 막히면 그동안 온 다른 메시지(버튼 포함)를 못 받는다. 결과는 그 프로세스가
     # 폰으로 직접 알린다 (cli.py의 _guide → _tell).
-    import subprocess
 
     from ..paths import CODE_ROOT
 
@@ -357,10 +357,7 @@ def _cmd_guide(conn: sqlite3.Connection, rest: str) -> str:
         argv += ["되돌리기", "--revert"]
     else:
         argv += [rest]
-    subprocess.Popen(
-        argv, cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    tasks.spawn(argv, log_name="guide")
 
     if clear_session:
         return "🧹 가이드 대화를 끊습니다…"
@@ -442,14 +439,11 @@ def _cmd_apply_start(conn: sqlite3.Connection, rest: str) -> str:
     if n and not n.isdigit():
         return "사용법: <code>/apply [건수]</code>  (숫자만, 생략하면 1건)"
 
-    import subprocess
-
     from ..paths import CODE_ROOT
 
-    subprocess.Popen(
+    tasks.spawn(
         [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "night-cycle", "--target", str(target)],
-        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        start_new_session=True,
+        log_name="apply",
     )
     return (
         f"🚀 지원 준비를 시작합니다 — 목표 {target}건.\n"
@@ -538,14 +532,12 @@ def _cmd_revert(conn: sqlite3.Connection, rest: str) -> str:
 
 def _cmd_plan(conn: sqlite3.Connection, rest: str) -> str:
     """고장 큐를 읽어 계획을 세운다. 위험도가 low면 승인 없이 바로 반영된다."""
-    import subprocess
 
     from ..paths import CODE_ROOT
 
-    subprocess.Popen(
+    tasks.spawn(
         [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "plan", "--limit", "1"],
-        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        start_new_session=True,
+        log_name="plan",
     )
     return (
         "🧭 수정 계획을 세웁니다 (Opus 5).\n"
@@ -562,14 +554,12 @@ def _cmd_improve(conn: sqlite3.Connection, rest: str) -> str:
     아니면 이 명령으로 사람이 부를 때만 돈다. 큐에 쌓아둔 지시(자유 텍스트로
     보낸 것)도 이 명령을 눌러야 실제로 처리가 시작된다.
     """
-    import subprocess
 
     from ..paths import CODE_ROOT
 
-    subprocess.Popen(
+    tasks.spawn(
         [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "improve", "--limit", "1"],
-        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        start_new_session=True,
+        log_name="improve",
     )
     return "🔧 자기개선을 시작합니다 — 전용 브랜치에서 작업하고 끝나면 알려드립니다."
 
@@ -784,16 +774,12 @@ def _drop_job(conn: sqlite3.Connection, job_id: str) -> None:
 def _start_revision(conn: sqlite3.Connection, job_id: str, feedback: str) -> None:
     """수정 요청을 반영해 다시 만든다. 브라우저를 띄우고 수 분이 걸리므로
     별도 프로세스로 돌린다 — 수신 루프가 막히면 다음 지시를 못 받는다."""
-    import subprocess
 
     from ..paths import CODE_ROOT
 
-    subprocess.Popen(
+    tasks.spawn(
         [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "revise", job_id, feedback],
-        cwd=str(CODE_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
+        log_name="revise",
     )
 
 
@@ -803,7 +789,6 @@ def _handle_fix_callback(conn: sqlite3.Connection, cb_id: str, data: str) -> Non
     거절이 단순히 "안 함"으로 끝나면 안 된다 — 자가복구가 붙잡아 둔 자동지원
     보류가 그대로 남아 파이프라인이 영영 안 돈다. 거절도 **푸는 동작**이다.
     """
-    import subprocess
 
     from ..paths import CODE_ROOT
 
@@ -846,10 +831,9 @@ def _handle_fix_callback(conn: sqlite3.Connection, cb_id: str, data: str) -> Non
 
     # 수행은 코딩 에이전트라 수 분~수십 분이다. 수신 루프를 막으면 그동안 온
     # 다른 버튼을 못 받는다(/guide·/apply와 같은 이유).
-    subprocess.Popen(
+    tasks.spawn(
         [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "fix-run", str(plan_id)],
-        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        start_new_session=True,
+        log_name="fix-run",
     )
 
 
@@ -922,20 +906,13 @@ def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
 
     # 제출은 브라우저를 띄우고 수 분이 걸린다. 수신 루프를 막지 않도록
     # 별도 프로세스로 돌리고, 결과는 그 프로세스가 폰으로 알린다.
-    import subprocess
     from ..paths import CODE_ROOT
 
     try:
         argv = [str(CODE_ROOT / ".venv/bin/python"), "cli.py", cmd, job_id]
         if cmd == "autoapply":
             argv.append("--live")
-        subprocess.Popen(
-            argv,
-            cwd=str(CODE_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        tasks.spawn(argv, log_name="submit")
     except Exception as e:  # noqa: BLE001
         log.warning("제출 실행 실패: %s", e)
         notify(conn, f"❌ 제출 실행 실패 — {type(e).__name__}")

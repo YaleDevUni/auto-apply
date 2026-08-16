@@ -39,6 +39,9 @@ PROFILE_DIR = INSTANCE_ROOT / "profile"
 DATA_DIR = INSTANCE_ROOT / "data"
 ASSET_DIR = DATA_DIR / "assets"
 DB_PATH = DATA_DIR / "jobs.db"
+# 스케줄 잡의 로그(plist StandardErrorPath)와 **같은 곳**이다. 폰에서 부른
+# 작업도 여기 남겨야 "왜 안 됐나"를 한 자리에서 본다 — tasks.spawn() 참고.
+LOG_DIR = DATA_DIR / "logs"
 RECIPE_DIR = INSTANCE_ROOT / "recipes"
 
 # 브라우저 프로필. 사람이 여기 한 번 로그인하면 러너가 계속 재사용한다.

@@ -284,19 +284,11 @@ def _trigger_plan(conn: sqlite3.Connection, command: str) -> str:
     if any("계획수립" in (t["kind"] or "") for t in active(conn)):
         return "건너뜀(이미 계획 수립 중)"
 
-    import subprocess
-
     from .paths import CODE_ROOT
+    from .tasks import spawn
 
-    try:
-        subprocess.Popen(
-            [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "plan"],
-            cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("계획 수립 실행 실패: %s", e)
-        return f"실행 실패: {e}"
+    if spawn([str(CODE_ROOT / ".venv/bin/python"), "cli.py", "plan"], log_name="plan") is None:
+        return "실행 실패"
     return "시작함"
 
 

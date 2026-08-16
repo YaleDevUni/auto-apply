@@ -33,6 +33,7 @@ import logging
 import os
 import signal
 import sqlite3
+import subprocess
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -49,6 +50,66 @@ _last_answer = False
 
 class Cancelled(RuntimeError):
     """사람이 중단을 요청했다. 고장이 아니다 — 여기까지 한 것은 그대로 둔다."""
+
+
+SPAWN_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def spawn(argv: list[str], *, log_name: str, cwd: str | None = None) -> int | None:
+    """긴 작업을 별도 프로세스로 띄운다. **출력을 파일로 남긴다.**
+
+    예전에는 어디서나 `stdout=DEVNULL, stderr=STDOUT`이었다. `stderr=STDOUT`은
+    "stdout과 같은 곳"이라는 뜻이라 **stderr까지 /dev/null로 갔다.** 그래서
+    폰에서 부른 작업(`/apply`·`/plan`·`fix-run`·제출·재작성)은 안에서 무엇이
+    죽든 아무 데도 안 남았다. 스케줄 잡은 plist의 `StandardErrorPath`가
+    받아주는데 폰에서 부른 것만 통째로 사라지는 비대칭이었고, 실측으로 그
+    상태에서 두 번 원인을 못 찾았다:
+
+        2026-08-16  `/guide`가 확인만 오고 결과가 안 옴 → ClaudeUnavailable
+        2026-08-17  지원준비가 조용히 끝남 → claude 실행 실패(exit 1)
+
+    로그가 없으면 남는 단서가 폰 메시지 한 줄뿐이고, 그 한 줄은 길이 제한에
+    걸려 잘린다. 원인을 담을 자리가 애초에 없었던 셈이다.
+
+    반환은 pid(또는 실패 시 None)다. 기다리지 않는다 — 부르는 쪽은 전부
+    수신 루프이거나 사이클이라 여기서 막히면 안 된다.
+    """
+    from .paths import CODE_ROOT, LOG_DIR
+
+    handle = subprocess.DEVNULL
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOG_DIR / f"{log_name}.log"
+        # 무한히 자라게 두지 않는다. 한 세대만 남기고 갈아치운다 — 여러 세대를
+        # 보관해봐야 이 로그를 읽는 시점은 "방금 뭐가 죽었나" 하나뿐이다.
+        if path.exists() and path.stat().st_size > SPAWN_LOG_MAX_BYTES:
+            path.replace(path.with_suffix(".log.1"))
+        handle = open(path, "a", buffering=1)  # noqa: SIM115  자식이 fd를 물고 산다
+        handle.write(f"\n===== {now()} {' '.join(argv[1:])} =====\n")
+    except Exception as e:  # noqa: BLE001
+        # 로그를 못 열었다고 작업을 안 띄우면 안 된다. 기록이 없는 실행이
+        # 실행이 없는 것보다 낫다 — 예전 동작으로 물러난다.
+        log.warning("작업 로그를 열지 못했다(그대로 띄운다): %s", e)
+
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd or str(CODE_ROOT),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("작업 실행 실패 %s: %s", argv[1:3], e)
+        return None
+    finally:
+        # Popen이 fd를 복제했으므로 부모 쪽은 닫아도 자식은 계속 쓴다.
+        if handle is not subprocess.DEVNULL:
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return proc.pid
 
 
 def _alive(pid: int) -> bool:
