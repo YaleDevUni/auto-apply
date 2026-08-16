@@ -79,6 +79,47 @@ def _raise_if_limited(text: str) -> None:
         raise UsageLimited(text.strip()[:300])
 
 
+def _explain_failure(raw: str) -> tuple[str, dict | None]:
+    """실패 원문에서 사람이 읽을 메시지와, 있으면 파싱된 오류 봉투를 낸다.
+
+    claude CLI는 exit!=0일 때도 오류 봉투를 stdout에 JSON으로 낸다(stderr는
+    빔). result는 usage 필드들 뒤에 오므로 원문을 그냥 500자로 자르면 result가
+    통째로 잘려나간다(실측: result 1208번째 문자, 컷은 500번째). 그래서
+    구조가 있으면 result/subtype/api_error_status를 앞으로 꺼내 조립한다.
+    JSON이 아니면 지금처럼 원문을 그대로 자른다.
+    """
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.strip()[:500], None
+    if not isinstance(payload, dict):
+        return raw.strip()[:500], None
+    parts = [str(payload[k]) for k in ("result", "subtype", "api_error_status") if payload.get(k)]
+    message = " / ".join(parts) if parts else raw.strip()
+    return message[:500], payload
+
+
+# 파싱된 실패 봉투에서만 보는 영어 한도 문구. 실측: api_error_status:429,
+# result:"You've hit your session limit · resets 9:50pm (Asia/Seoul)".
+#
+# `_LIMIT_MARKERS`에 합치지 않는다 — orchestrator._agent가 코딩 에이전트의
+# 출력 전문을 그대로 `_raise_if_limited`에 넘기는데, 거기엔 한도를 논의하는
+# 계획문만 있어도 걸린다(재현 확인). 여기 목록은 claude CLI 오류 봉투를
+# 실제로 파싱했을 때만 검사하므로 그 오염 경로를 안 탄다.
+_LIMIT_MARKERS_PAYLOAD = ("session limit", "hit your")
+
+
+def _raise_if_limited_payload(payload: dict | None) -> None:
+    """파싱된 실패 봉투 버전. `_raise_if_limited`와 나란히, 대신한다."""
+    if not payload:
+        return
+    if payload.get("api_error_status") == 429:
+        raise UsageLimited(str(payload.get("result") or "사용 한도")[:300])
+    result = str(payload.get("result") or "").lower()
+    if any(m in result for m in _LIMIT_MARKERS_PAYLOAD):
+        raise UsageLimited(str(payload.get("result"))[:300])
+
+
 def cli_available() -> bool:
     return shutil.which("claude") is not None
 
@@ -169,10 +210,10 @@ def ask(
     # 들어 있어 무엇을 찾든 우연히 걸릴 수 있다.
     if proc.returncode != 0:
         combined = (proc.stdout or "") + (proc.stderr or "")
-        _raise_if_limited(combined)  # 한도는 고장이 아니다. 별도로 다룬다.
-        raise RuntimeError(
-            f"claude 실행 실패 (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}"
-        )
+        message, fail_payload = _explain_failure(proc.stdout or proc.stderr or "")
+        _raise_if_limited_payload(fail_payload)  # 파싱됐으면 이쪽이 먼저다 — 더 정확하다.
+        _raise_if_limited(combined)  # 비-JSON 출력 대비 폴백(회귀 방지).
+        raise RuntimeError(f"claude 실행 실패 (exit {proc.returncode}): {message}")
 
     try:
         payload = json.loads(proc.stdout)
@@ -181,6 +222,7 @@ def ask(
 
     if isinstance(payload, dict):
         if payload.get("is_error"):
+            _raise_if_limited_payload(payload)
             _raise_if_limited(str(payload.get("result", "")))
             raise RuntimeError(f"claude 오류: {str(payload.get('result'))[:500]}")
         _log_cost(payload, model=model, job_id=job_id, phase=phase)
@@ -248,10 +290,10 @@ def ask_session(
 
     if proc.returncode != 0:
         combined = (proc.stdout or "") + (proc.stderr or "")
+        message, fail_payload = _explain_failure(proc.stdout or proc.stderr or "")
+        _raise_if_limited_payload(fail_payload)
         _raise_if_limited(combined)
-        raise RuntimeError(
-            f"claude 실행 실패 (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}"
-        )
+        raise RuntimeError(f"claude 실행 실패 (exit {proc.returncode}): {message}")
 
     try:
         payload = json.loads(proc.stdout)
@@ -259,6 +301,7 @@ def ask_session(
         return {"text": proc.stdout.strip(), "session_id": session_id or ""}
 
     if payload.get("is_error"):
+        _raise_if_limited_payload(payload)
         _raise_if_limited(str(payload.get("result", "")))
         raise RuntimeError(f"claude 오류: {str(payload.get('result'))[:500]}")
     _log_cost(payload, model=model, job_id=job_id, phase=phase)
