@@ -550,7 +550,7 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     filled = resume_editor.fill(
         built["data"], resume_url=resume_url,
         template=None if resume_url else template,
-        new_title=new_title, dry_run=False,
+        new_title=new_title, job_id=job_id, dry_run=False,
     )
     _remember_preview_resume(filled.get("url", ""))
 

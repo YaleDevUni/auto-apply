@@ -29,6 +29,12 @@ from .session import PlaywrightSession, browser
 log = logging.getLogger(__name__)
 
 
+def _stamp() -> str:
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
 def _set(page, selector: str, value: str) -> None:
     """값을 넣고 **포커스를 뺀다.**
 
@@ -1000,6 +1006,7 @@ def fill(
     resume_url: str | None = None,
     template: str | None = None,
     new_title: str | None = None,
+    job_id: int | str = "x",
     dry_run: bool = True,
     headless: bool = False,
     only: tuple[str, ...] | None = None,
@@ -1153,6 +1160,20 @@ def fill(
         }
         lost = [k for k, ok in persisted.items() if not ok]
 
+        # 화면을 남긴다. 나중에 "왜 이렇게 됐나"를 물을 때 그때의 화면이
+        # 없으면 추측밖에 못 한다 — 자가개선 에이전트가 셀렉터를 추측으로
+        # 고친 적이 있고, 그 고침은 틀렸다.
+        shot = ""
+        try:
+            from ..paths import EVIDENCE_DIR
+
+            EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+            shot = str(EVIDENCE_DIR / f"editor-{job_id}-{_stamp()}.png")
+            p.screenshot(path=shot, full_page=True)
+        except Exception as e:  # noqa: BLE001
+            log.info("편집기 화면 저장 실패(무시): %s", e)
+            shot = ""
+
         # 화면 수준 점검. 값 대조가 통과해도 섹션이 미완성일 수 있다.
         page_audit = audit(p, data, steps=tuple(steps))
         if not page_audit["ok"]:
@@ -1168,7 +1189,8 @@ def fill(
             "filled": filled, "missing": missing,
             "persisted": persisted, "lost": lost,
             "dates": dates, "selects": selects, "finalized": finalized,
-            "audit": page_audit, "skills": skills, "skills_skipped": skills_skipped,
+            "audit": page_audit, "shot": shot,
+            "skills": skills, "skills_skipped": skills_skipped,
             "links": links, "languages": langs,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
@@ -1557,4 +1579,5 @@ def fill_report(result: dict[str, Any]) -> dict[str, Any]:
         "platform_todo": (result.get("audit") or {}).get("platform_todo") or [],
         "finalized": result.get("finalized"),
         "completeness": (result.get("audit") or {}).get("completeness"),
+        "shot": result.get("shot") or "",
     }

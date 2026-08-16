@@ -85,6 +85,130 @@ def _human_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
+def _vision_brief(shot: str | None, question: str) -> str:
+    """스크린샷을 **미리 읽어** 글로 바꾼다. 그 글을 할 일에 박아 넣는다.
+
+    에이전트에게 경로만 주고 "읽어라"라고 하는 것과 다르다. 그건 읽을지 말지가
+    에이전트에게 달렸고, 실제로 안 읽고 셀렉터를 추측으로 고친 적이 있다.
+    여기서 먼저 읽어 텍스트로 만들면 **읽지 않을 수가 없다** — 할 일 본문이
+    이미 화면 이야기다.
+
+    싸기도 하다. 판독 한 번은 몇 초, 몇 센트다. 추측으로 고친 레시피가 다음
+    사이클을 통째로 날리는 것보다 훨씬 싸다.
+
+    실패하면 빈 문자열을 준다. 비전이 없다고 자가개선이 멈추면 안 된다 —
+    스크린샷 경로는 어차피 할 일에 같이 들어간다.
+    """
+    if not shot:
+        return ""
+    from pathlib import Path as _P
+
+    if not _P(shot).exists():
+        return ""
+
+    try:
+        from . import vision
+
+        if not vision.available():
+            return ""
+        out = vision.ask(shot, question, ignore=vision.DEFAULT_IGNORE)
+    except Exception as e:  # noqa: BLE001
+        log.info("증적 판독 건너뜀: %s", e)
+        return ""
+
+    return f"\n\n[화면 판독 — 위 스크린샷을 먼저 읽은 결과]\n{out.strip()[:1200]}\n"
+
+
+def _editor_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """이력서 편집기 쪽 고장을 할 일로 바꾼다.
+
+    이게 없으면 편집기가 망가져도 자가개선이 모른다. `apply_ledger`에는
+    **지원 폼** 실패만 남고, 편집기는 그 앞 단계라 실패해도 거기 안 남는다.
+    실제로 완성도가 71%에서 멈추던 몇 주 동안 오케스트레이터는 아무 신호도
+    못 받았다 — 사람이 화면을 열어보고서야 알았다.
+
+    신호는 `fill_report`다. 같은 증상이 **2건 이상** 쌓였을 때만 올린다.
+    한 건은 그 공고만의 사정일 수 있고, 반복되면 레시피가 현실과 어긋난 것이다.
+    """
+    rows = conn.execute(
+        """SELECT b.job_id, b.fill_report, b.completeness, j.platform
+           FROM resume_builds b JOIN jobs j ON j.id = b.job_id
+           WHERE b.fill_report IS NOT NULL AND b.fill_report != ''
+           ORDER BY b.built_at DESC LIMIT 20"""
+    ).fetchall()
+
+    # 증상을 플랫폼 단위로 **한 덩어리**로 모은다. 쪼개면 안 되는 이유:
+    # 71% 정체는 '저장 안 됨'·'플랫폼이 미입력'·'작성 완료 안 눌림'이 한꺼번에
+    # 나타났지만 원인은 하나였다. 따로 올리면 같은 고장에 브랜치를 넷 파고
+    # 에이전트를 네 번 돌린다 — 그리고 넷 다 같은 곳을 고치려 든다.
+    seen: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        try:
+            rep = json.loads(r["fill_report"] or "{}")
+        except json.JSONDecodeError:
+            continue
+
+        found: list[str] = []
+        if rep.get("lost"):
+            found.append(f"입력했는데 저장 안 됨: {', '.join(rep['lost'][:4])}")
+        if rep.get("platform_todo"):
+            found.append(f"플랫폼이 미입력이라고 함: {rep['platform_todo'][0][:60]}")
+        if rep.get("finalized") is False:
+            found.append("'작성 완료'가 눌리지 않음")
+        if len(rep.get("skills_skipped") or []) >= 3:
+            found.append(f"스킬 {len(rep['skills_skipped'])}개 등록 실패")
+        if not found:
+            continue
+
+        e = seen.setdefault(
+            r["platform"], {"jobs": [], "symptoms": {}, "platform": r["platform"], "shot": ""}
+        )
+        e["jobs"].append(r["job_id"])
+        e["shot"] = e["shot"] or (rep.get("shot") or "")
+        for f in found:
+            key = f.split(":")[0]
+            e["symptoms"].setdefault(key, f)
+            e[key] = e.get(key, 0) + 1
+
+    items: list[dict[str, Any]] = []
+    for platform, e in seen.items():
+        # 한 건은 그 공고만의 사정일 수 있다. 반복돼야 레시피 문제다.
+        if len(e["jobs"]) < 2:
+            continue
+        lines = "\n".join(f"  - {v}" for v in e["symptoms"].values())
+        brief = _vision_brief(
+            e.get("shot"),
+            "이 화면은 이력서 편집기를 자동으로 채운 직후다.\n"
+            "보이는 것만 사실대로 적어라:\n"
+            "1. 완성도 퍼센트와 그 옆 체크리스트에서 **체크가 안 된 항목**\n"
+            "2. 빨간 별표(*)가 붙었는데 값이 없는 칸의 이름\n"
+            "3. 오류·경고 문구가 있으면 그대로\n"
+            "4. '작성 완료' 버튼이 보이는지, 눌릴 수 있어 보이는지\n"
+            "추측하지 마라.",
+        )
+        items.append({
+            "source": "self",
+            "title": f"{platform} 이력서 편집기 이상 {len(e['jobs'])}건",
+            "task": (
+                f"{platform} 이력서 편집기에서 이상이 {len(e['jobs'])}건 반복됐다.\n"
+                f"증상:\n{lines}\n"
+                f"해당 공고: {', '.join(str(j) for j in e['jobs'][:6])}\n"
+                + (f"편집기 화면: {e['shot']}\n" if e.get("shot") else "")
+                + f"{brief}\n"
+                "이 증상들은 **한 원인의 여러 얼굴일 가능성이 높다.** 각각을 따로 "
+                "고치려 들지 말고 공통 원인을 먼저 찾아라.\n\n"
+                f"`python cli.py builds --limit 10` 으로 기록을 먼저 보라. "
+                f"recipes/{platform}.json 의 editor 섹션이 현재 화면과 맞는지 "
+                "확인하고 고쳐라.\n\n"
+                "**주의**: 사본(copy) 경로에서는 학력·링크·언어를 일부러 건너뛴다. "
+                "그 섹션이 비었다는 신고는 고장이 아니다 — resume_editor.COPY_STEPS를 "
+                "먼저 확인하라.\n"
+                "검증은 `python cli.py resume <job_id>` (dry-run)로 한다."
+            ),
+        })
+    return items
+
+
 def _self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """A 파이프라인이 남긴 신호를 할 일로 바꾼다. LLM 호출 0회로 판단한다."""
     items: list[dict[str, Any]] = []
@@ -96,6 +220,16 @@ def _self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ).fetchall()
     for f in fails:
         if f["n"] >= 2:
+            brief = _vision_brief(
+                f["shot"],
+                "이 화면은 채용 지원 폼을 자동으로 채우다 실패한 순간이다.\n"
+                "지금 화면에 **무엇이 보이는지** 사실만 적어라:\n"
+                "1. 어떤 페이지인가 (지원 폼 / 로그인 / 오류 / 목록 중 무엇인가)\n"
+                "2. 오류 메시지·경고 배너가 있으면 그 문구 그대로\n"
+                "3. 버튼과 입력칸의 이름 (자동화가 찾아야 할 것들)\n"
+                "4. 로그인이 풀린 정황이 있는가\n"
+                "추측하지 말고 보이는 것만 적어라.",
+            )
             items.append({
                 "source": "self",
                 "title": f"{f['platform']} 지원 실패 {f['n']}건",
@@ -104,7 +238,8 @@ def _self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     f"마지막 오류: {f['err']}\n"
                     f"증적 스크린샷: {f['shot']}\n\n"
                     f"**먼저 위 스크린샷을 Read 도구로 읽어라.** 화면이 어떻게 달라졌는지 "
-                    "보지 않고 셀렉터를 고치면 추측일 뿐이다.\n\n"
+                    "보지 않고 셀렉터를 고치면 추측일 뿐이다."
+                    f"{brief}\n"
                     f"recipes/{f['platform']}.json 이 현재 화면과 맞는지 확인하고 고쳐라. "
                     "고친 뒤 `python cli.py apply <job_id>` (dry-run, 제출 안 함)로 검증하라. "
                     "--live 는 절대 쓰지 마라."
@@ -137,7 +272,7 @@ def _self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def gather(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """사람 지시가 항상 먼저다."""
-    return _human_items(conn) + _self_items(conn)
+    return _human_items(conn) + _self_items(conn) + _editor_items(conn)
 
 
 # ─────────────────────── 실행 ───────────────────────
