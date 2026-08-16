@@ -89,6 +89,44 @@ def _call(
     return data["result"]
 
 
+# 텔레그램 클라이언트가 "/"만 쳤을 때 보여주는 자동완성 목록.
+#
+# API 제약: command 필드는 영문 소문자·숫자·밑줄만 허용한다(1~32자). 그래서
+# /지원시작처럼 한글 명령은 여기 그대로 못 넣는다 — 이미 있는 영문 별칭
+# (/apply_start)으로 등록한다. 명령 자체는 두 이름 다 그대로 동작한다
+# (listener.py `_handle`이 `("/지원시작", "/apply_start")` 둘 다 받는다).
+# 설명(description)은 한글을 그대로 쓸 수 있다.
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("status", "현재 상태"),
+    ("quota", "오늘 남은 지원 한도"),
+    ("blocked", "막힌 이유"),
+    ("targets", "지원 대기열"),
+    ("apply_start", "수집→지원준비를 지금 바로 (지원시작과 동일)"),
+    ("improve", "개발 지시 큐 + 자체진단을 지금 처리"),
+    ("pause", "자동지원 정지"),
+    ("resume", "재개"),
+    ("queue", "개발 지시 큐"),
+    ("guide", "작성 가이드 수정 (뒤에 지시문을 붙여서)"),
+    ("revlog", "수정 요청 원장 (목록/edit/delete)"),
+    ("help", "명령어 전체 도움말"),
+]
+
+
+def set_commands(conn: sqlite3.Connection) -> bool:
+    """텔레그램 네이티브 "/" 자동완성 목록을 등록한다.
+
+    setMyCommands를 한 번도 안 부르면 "/"를 쳐도 아무 목록도 안 뜬다 —
+    봇이 명령을 처리 못 하는 게 아니라, 텔레그램 클라이언트가 뭐가 있는지
+    몰라서다. 멱등이라 몇 번을 다시 불러도 안전하다(매번 전체를 덮어쓴다).
+    """
+    token, _ = _creds(conn)
+    _call(
+        token, "setMyCommands",
+        commands=[{"command": c, "description": d} for c, d in BOT_COMMANDS],
+    )
+    return True
+
+
 def setup(conn: sqlite3.Connection, token: str) -> dict[str, Any]:
     """봇에게 보낸 마지막 메시지에서 chat_id를 찾아 저장한다."""
     me = _call(token, "getMe")
@@ -108,6 +146,10 @@ def setup(conn: sqlite3.Connection, token: str) -> dict[str, Any]:
         token, "sendMessage", chat_id=chat["id"],
         text=f"연결됐다. 에이전트가 스스로 못 넘는 지점에서 여기로 알린다.\n봇: @{me['username']}",
     )
+    try:
+        set_commands(conn)
+    except Exception as e:  # noqa: BLE001
+        log.warning("명령어 자동완성 등록 실패(무시): %s", e)
     return {
         "bot": me["username"],
         "chat_id": chat["id"],

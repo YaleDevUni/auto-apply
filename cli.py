@@ -90,6 +90,7 @@ def main() -> int:
     sub.add_parser("where", help="경로 확인")
 
     tsp = sub.add_parser("telegram-setup", help="텔레그램 알림 연결")
+    sub.add_parser("telegram-commands", help='텔레그램 "/" 자동완성 목록 다시 등록')
     tsp.add_argument("token", help="@BotFather에게 받은 봇 토큰")
 
     sub.add_parser("notify-login", help="세션 끊김 알림 수동 트리거 (쿨다운 무시하지 않음)")
@@ -245,6 +246,11 @@ def main() -> int:
     elif args.cmd == "telegram-setup":
         conn = connect()
         _out(telegram.setup(conn, args.token))
+        conn.close()
+    elif args.cmd == "telegram-commands":
+        conn = connect()
+        telegram.set_commands(conn)
+        _out({"등록": [c for c, _ in telegram.BOT_COMMANDS]})
         conn.close()
     elif args.cmd == "notify-login":
         _out(agent.notify_login_required())
