@@ -1,3 +1,29 @@
+## 상주 리스너가 run.sh를 안 거치면 PATH에 claude가 없다 (2026-08-16)
+
+`/guide` 요청이 "시작합니다" 확인만 오고 diff가 안 왔다. 원인 추적이 어려웠던
+이유는 `com.autoapply.listen`이 `subprocess.Popen(stdout=DEVNULL,
+stderr=STDOUT)`으로 `cli.py`를 fire-and-forget 실행하는데, 안에서 죽어도
+그 출력이 전부 버려져서 아무 데도 안 남았다는 것이다.
+
+`cli.py` 최상단에 잡히지 않은 예외를 텔레그램으로도 보내는 안전망을 먼저
+넣고 나서야("cli.py 처리 안 된 오류") `ClaudeUnavailable: claude CLI를 찾을
+수 없습니다`가 드러났다.
+
+진짜 원인: `com.autoapply.night`/`flush`는 `run.sh`를 거치는데, `run.sh`가
+`export PATH="$HOME/.local/bin:..."`를 스스로 하고 있었다. 반면
+`com.autoapply.listen`은 `run.sh`를 안 거치고 launchd가 `python`을 직접
+띄운다 — launchd 기본 PATH(`/usr/bin:/bin:/usr/sbin:/sbin`)엔 `claude`가
+없고, 리스너가 띄우는 모든 서브프로세스(`/guide`, `/지원시작`, `/improve`,
+수정요청 재작성)가 그 PATH를 그대로 물려받는다.
+
+`com.autoapply.listen.plist`에 `EnvironmentVariables/PATH`를 넣어
+`run.sh`와 같은 값으로 맞췄다. 검증은 리스너 프로세스의 실제 환경변수를
+그대로 복제해 `cli.py guide`를 돌려 끝까지 통과하는 걸 확인했다(PATH 없이
+`env -i`로 돌리면 바로 `ClaudeUnavailable`로 죽는 것도 대조 확인).
+
+**교훈**: launchd 잡을 새로 추가할 때 `run.sh`를 거치지 않는 잡은 PATH를
+따로 챙겨야 한다. 하나가 되면 나머지도 된다고 가정하면 안 된다.
+
 ## 이력서 정리는 '우리가 만든 것'만 지운다 (2026-08-16)
 
 `resumes --cleanup`이 사람이 직접 만든 이력서를 지웠다
