@@ -103,9 +103,25 @@ def main() -> int:
         help="상시 대기하며 즉시 응답한다 (롱폴링). 없으면 한 번 훑고 끝낸다",
     )
 
-    cq = sub.add_parser("improve", help="자기개선 오케스트레이터 — 전용 브랜치에서만 작업")
+    cq = sub.add_parser("improve", help="자가복구 계획을 세운다 (plan의 별칭)")
     cq.add_argument("--limit", type=int, default=1)
     cq.add_argument("--list", action="store_true", help="할 일만 보고 실행하지 않는다")
+
+    plp = sub.add_parser(
+        "plan", help="고장 큐·지시를 읽어 수정 계획을 세운다. low면 바로 반영")
+    plp.add_argument("--limit", type=int, default=1)
+    plp.add_argument("--list", action="store_true", help="할 일만 보고 실행하지 않는다")
+
+    fxp = sub.add_parser("fix-run", help="승인된 계획을 수행한다")
+    fxp.add_argument("plan_id", type=int)
+
+    erp = sub.add_parser("errors", help="고장 큐")
+    erp.add_argument("--limit", type=int, default=12)
+
+    sub.add_parser("plans", help="수정 계획 목록")
+
+    rvp = sub.add_parser("fix-revert", help="자동반영된 커밋을 되돌린다")
+    rvp.add_argument("sha")
 
     rsp = sub.add_parser("resumes", help="플랫폼 이력서 목록 / 정리")
     rsp.add_argument(
@@ -192,7 +208,9 @@ _TASK_KINDS = {
     "autoapply": "지원준비",
     "submit": "제출",
     "apply": "지원 폼 실행",
-    "improve": "자기개선",
+    "improve": "계획수립",
+    "plan": "계획수립",
+    "fix-run": "자가복구",
     "revise": "이력서 재작성",
     "resumes": "이력서 정리",
     "reevaluate": "재판정",
@@ -322,7 +340,9 @@ def _dispatch(args: argparse.Namespace) -> int:
                 _out(listener.drain(conn))
         finally:
             conn.close()
-    elif args.cmd == "improve":
+    elif args.cmd in ("improve", "plan"):
+        # improve는 plan의 옛 이름이다. 승인 없이 곧장 코드를 고치던 경로가
+        # 계획→(위험도)→반영 으로 바뀌었고, 두 이름을 둘 이유가 없어 합쳤다.
         from src.autoapply import orchestrator
 
         if args.list:
@@ -330,7 +350,36 @@ def _dispatch(args: argparse.Namespace) -> int:
             _out(orchestrator.gather(conn))
             conn.close()
         else:
-            _out(orchestrator.run(limit=args.limit))
+            _out(orchestrator.plan(limit=args.limit))
+    elif args.cmd == "fix-run":
+        from src.autoapply import orchestrator
+
+        _out(orchestrator.execute(plan_id=args.plan_id))
+    elif args.cmd == "errors":
+        from src.autoapply import errors
+
+        conn = connect()
+        try:
+            _out(errors.summary(conn, args.limit))
+        finally:
+            conn.close()
+    elif args.cmd == "plans":
+        conn = connect()
+        try:
+            _out([dict(r) for r in conn.execute(
+                "SELECT id, created_at, title, risk, auto, status, branch, commit_sha "
+                "FROM fix_plans ORDER BY id DESC LIMIT 12"
+            )])
+        finally:
+            conn.close()
+    elif args.cmd == "fix-revert":
+        from src.autoapply import orchestrator
+
+        conn = connect()
+        try:
+            _out(orchestrator.revert(conn, args.sha))
+        finally:
+            conn.close()
     elif args.cmd == "resumes":
         from src.autoapply.runner import resume_editor
 
@@ -387,14 +436,14 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
     고치는 버그가 난다.
     """
     from src.autoapply.db import connect as _connect
-    from src.autoapply.notify.listener import is_paused
+    from src.autoapply.notify.listener import is_paused, pause_reason
 
     log = logging.getLogger(__name__)
 
     conn = _connect()
     try:
         if is_paused(conn):
-            return {"skipped": "일시정지 상태 (텔레그램 /resume 으로 해제)"}
+            return {"skipped": f"일시정지 — {pause_reason(conn)}"}
     finally:
         conn.close()
 
@@ -500,12 +549,12 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
     알림은 쌓아뒀다가 나중에 한 번에 보낸다.
     """
     from src.autoapply.db import connect as _connect
-    from src.autoapply.notify.listener import is_paused
+    from src.autoapply.notify.listener import is_paused, pause_reason
 
     conn = _connect()
     try:
         if is_paused(conn):
-            return {"skipped": "일시정지 상태 (텔레그램 /resume 으로 해제)"}
+            return {"skipped": f"일시정지 — {pause_reason(conn)}"}
         # 최근 준비한 공고는 건너뛴다. dry-run은 선점하지 않으므로 이게 없으면
         # 매 사이클 같은 1위만 다시 준비하고 대기열이 줄지 않는다.
         targets = agent.next_targets(limit, conn, skip_prepared_hours=24)
@@ -580,7 +629,13 @@ def _flush_notifications() -> dict:
                 and telegram.send_photo(conn, r["photo_path"], r["caption"], buttons)
             )
             if not ok:
-                telegram.notify(conn, r["caption"])
+                # 버튼을 떨어뜨리면 안 된다. 승인 요청이 새벽에 쌓였다가
+                # 아침에 **누를 것 없이** 도착한다 — 사진이 없는 알림(수정 계획
+                # 승인 등)이 정확히 그 경우다.
+                if buttons:
+                    telegram.notify_with_buttons(conn, r["caption"], buttons)
+                else:
+                    telegram.notify(conn, r["caption"])
             conn.execute(
                 "UPDATE pending_notifications SET sent_at=? WHERE id=?", (now(), r["id"])
             )

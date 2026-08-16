@@ -63,17 +63,97 @@ HELP = (
     "/revlog edit N 내용  N번을 고친다\n"
     "/revlog delete N     N번을 지운다\n\n"
     "<b>수동 실행 (언제든, 스케줄 무관)</b>\n"
-    "/apply [건수]        지원준비를 지금 바로 (수집은 낮 12시에 따로). 기본 1건\n"
-    "/improve             개발 지시 큐 + 자체진단을 지금 처리\n\n"
+    "/apply [건수]        지원준비를 지금 바로 (수집은 낮 12시에 따로). 기본 1건\n\n"
+    "<b>자가복구</b>\n"
+    "/errors              고장 큐 (🌐 표시는 바깥 사정 — 안 고칩니다)\n"
+    "/plan                지금 수정 계획을 세운다 (<code>/improve</code>와 같음)\n"
+    "/plans               계획 목록과 상태\n"
+    "/reverts             자동으로 main에 들어간 커밋들\n"
+    "/revert &lt;해시&gt;       그 커밋을 되돌린다\n\n"
+    "<i>고장이 나면 스스로 계획을 세웁니다. 위험도가 낮고 검증이 통과하면 "
+    "승인 없이 main에 반영하고 커밋 메시지를 보냅니다. 그 밖은 승인 버튼을 "
+    "보내고, 브랜치에만 커밋합니다.\n"
+    "자가복구가 도는 동안 자동지원은 멈췄다가 끝나면 재개됩니다.</i>\n\n"
     "<b>개발 지시</b>\n"
-    "그 외 아무 말이나 보내면 개발 큐에 쌓입니다. 자동으로는 안 돌고, "
-    "문제가 자체진단됐거나 <code>/improve</code>를 눌러야 처리됩니다.\n"
-    "브랜치에만 커밋되고 main에는 안 닿습니다."
+    "그 외 아무 말이나 보내면 개발 큐에 쌓입니다. <code>/plan</code>을 눌러야 "
+    "계획이 만들어집니다."
 )
 
 
+# 자가복구가 진행 중이라 자동지원을 붙잡아 둔 상태. 사람이 누른 /pause와
+# **다른 열쇠**를 쓴다. 하나로 합치면 자가복구가 끝나며 푸는 순간 사람이
+# 걸어둔 정지까지 같이 풀린다 — 사람은 자기가 멈춰둔 줄 알고 있는데 지원이
+# 나가는 상태가 되고, 그건 되돌릴 수 없다.
+FIX_HOLD_KEY = "pipeline_hold_fix"
+
+# 붙잡아 둔 지 이 시간이 지나면 무시한다. 수행 프로세스가 풀지 못하고 죽으면
+# (kill -9, 맥 재부팅) 표식만 남아 파이프라인이 영영 멈춘다. 사람이 눈치채기
+# 전까지 며칠이 갈 수 있는 종류의 고장이라 시한을 둔다.
+FIX_HOLD_STALE_HOURS = 12
+
+
+def hold_for_fix(conn: sqlite3.Connection, plan_id: int | None, note: str = "") -> None:
+    """자가복구가 도는 동안 자동지원을 붙잡는다.
+
+    고장이 난 채로 지원을 계속 내보내면, 고치는 중에도 같은 고장으로 자리가
+    소모된다. 최악은 절반만 채워진 이력서가 실제로 제출되는 것이다.
+    """
+    import json as _json
+
+    set_setting(conn, FIX_HOLD_KEY, _json.dumps(
+        {"plan_id": plan_id, "since": now(), "note": note[:120]}, ensure_ascii=False
+    ))
+
+
+def release_fix_hold(conn: sqlite3.Connection) -> None:
+    set_setting(conn, FIX_HOLD_KEY, "")
+
+
+def fix_hold(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """지금 걸린 자가복구 보류. 오래된 것은 여기서 스스로 걷어낸다."""
+    import json as _json
+    from datetime import datetime
+
+    raw = get_setting(conn, FIX_HOLD_KEY, "")
+    if not raw:
+        return None
+    try:
+        info = _json.loads(raw)
+        elapsed = (
+            datetime.now().astimezone() - datetime.fromisoformat(info["since"])
+        ).total_seconds() / 3600
+    except Exception:  # noqa: BLE001
+        release_fix_hold(conn)
+        return None
+
+    if elapsed >= FIX_HOLD_STALE_HOURS:
+        log.warning("자가복구 보류가 %.0f시간째 — 걷어낸다 (수행이 풀지 못하고 죽은 듯)", elapsed)
+        release_fix_hold(conn)
+        return None
+    info["hours"] = elapsed
+    return info
+
+
 def is_paused(conn: sqlite3.Connection) -> bool:
-    return get_setting(conn, PAUSE_KEY, "0") == "1"
+    """자동지원을 지금 내보내도 되나. 두 가지 이유로 멈춘다.
+
+    호출부(`night-cycle`, `cycle-apply`)가 이 함수 하나만 보므로, 자가복구
+    보류를 여기 얹으면 두 경로가 자동으로 같이 멈춘다.
+    """
+    if get_setting(conn, PAUSE_KEY, "0") == "1":
+        return True
+    return fix_hold(conn) is not None
+
+
+def pause_reason(conn: sqlite3.Connection) -> str:
+    """왜 멈췄는지 한 줄. 사람이 /status에서 이유를 못 보면 /resume만 누르게 된다."""
+    if get_setting(conn, PAUSE_KEY, "0") == "1":
+        return "사람이 정지시킴 (/resume 으로 해제)"
+    held = fix_hold(conn)
+    if held:
+        plan = f" #{held['plan_id']}" if held.get("plan_id") else ""
+        return f"자가복구 진행 중{plan} — 고쳐지면 자동으로 재개됩니다"
+    return ""
 
 
 def _fetch(conn: sqlite3.Connection, wait: int = 0) -> list[dict[str, Any]]:
@@ -117,7 +197,7 @@ def _cmd_status(conn) -> str:
         f"수집 {s['jobs']} · 통과 {s['passed']} · 지원가능 {s['actionable']}\n"
         f"선점 {s['claimed']} · 제출 {s['submitted']} · 실패 {s['failed']}\n"
         f"오늘 한도 {q['used_today']}/{q['max_per_day']}"
-        + ("\n⏸ <b>정지 상태</b>" if is_paused(conn) else "")
+        + (f"\n⏸ <b>정지 상태</b> — {pause_reason(conn)}" if is_paused(conn) else "")
     )
 
 
@@ -215,7 +295,19 @@ def _cmd_pause(conn) -> str:
 
 
 def _cmd_resume(conn) -> str:
+    """사람이 거는 재개. 자가복구 보류도 같이 푼다 — 사람에게는 늘 빠져나갈
+    길이 있어야 한다. 보류가 남아 있는데 /resume이 안 들으면, 왜 안 도는지
+    모르는 채로 밤이 지나간다."""
+    held = fix_hold(conn)
     set_setting(conn, PAUSE_KEY, "0")
+    if held:
+        release_fix_hold(conn)
+        plan = f" #{held['plan_id']}" if held.get("plan_id") else ""
+        return (
+            f"▶️ 자동지원을 재개했습니다.\n"
+            f"<i>진행 중이던 자가복구{plan} 보류도 같이 풀었습니다 — "
+            "고장이 안 고쳐진 상태로 지원이 나갈 수 있습니다.</i>"
+        )
     return "▶️ 자동지원을 재개했습니다."
 
 
@@ -366,6 +458,103 @@ def _cmd_apply_start(conn: sqlite3.Connection, rest: str) -> str:
     )
 
 
+def _cmd_errors(conn: sqlite3.Connection, rest: str) -> str:
+    """고장 큐. external도 같이 보여준다 — 무엇이 '바깥 사정'으로 분류됐는지
+    사람이 봐야 오분류를 잡는다. 조용히 걸러진 것은 아무도 못 고친다."""
+    from .. import errors
+
+    rows = errors.summary(conn, 10)
+    if not rows:
+        return "🐛 고장 큐가 비어 있습니다."
+    icon = {"open": "🔴", "planned": "🟡", "fixing": "🔧", "fixed": "✅", "dismissed": "➖"}
+    lines = []
+    for r in rows:
+        tag = "🌐" if r["class"] == "external" else icon.get(r["status"], "•")
+        n = f" ×{r['count']}" if r["count"] > 1 else ""
+        lines.append(
+            f"{tag} #{r['id']} {html.escape(r['exc_type'] or '')}{n}\n"
+            f"    <i>{html.escape((r['message'] or '')[:60])}</i>"
+        )
+    return (
+        "<b>고장 큐</b>  (🌐=바깥 사정, 안 고침)\n" + "\n".join(lines)
+        + "\n\n계획을 세우려면 <code>/plan</code>"
+    )
+
+
+def _cmd_plans(conn: sqlite3.Connection, rest: str) -> str:
+    rows = conn.execute(
+        "SELECT id, title, risk, auto, status, branch, commit_sha FROM fix_plans "
+        "ORDER BY id DESC LIMIT 8"
+    ).fetchall()
+    if not rows:
+        return "📋 수정 계획이 없습니다."
+    icon = {"pending": "⏳", "running": "🔧", "done": "✅", "demoted": "🟡",
+            "rejected": "❌", "failed": "💥", "reverted": "↩️"}
+    lines = []
+    for r in rows:
+        where = "main" if r["commit_sha"] else (r["branch"] or "")
+        lines.append(
+            f"{icon.get(r['status'], '•')} #{r['id']} [{r['risk']}] "
+            f"{html.escape((r['title'] or '')[:44])}\n    <i>{r['status']} · {where}</i>"
+        )
+    return "<b>수정 계획</b>\n" + "\n".join(lines)
+
+
+def _cmd_reverts(conn: sqlite3.Connection, rest: str) -> str:
+    """자동으로 main에 들어간 것들. 사람이 나중에 훑어볼 수 있어야 한다 —
+    자는 동안 반영된 걸 확인할 방법이 없으면 자동반영을 믿을 수 없다."""
+    from .. import orchestrator
+
+    rows = orchestrator.recent_auto_commits(conn)
+    if not rows:
+        return "↩️ 자동반영된 커밋이 없습니다."
+    lines = [
+        f"· <code>{r['commit_sha']}</code> #{r['id']} "
+        f"{html.escape((r['title'] or '')[:40])}"
+        + (" ↩️되돌림" if r["status"] == "reverted" else "")
+        for r in rows
+    ]
+    return (
+        "<b>자동반영된 커밋</b>\n" + "\n".join(lines)
+        + "\n\n되돌리려면 <code>/revert &lt;해시&gt;</code>"
+    )
+
+
+def _cmd_revert(conn: sqlite3.Connection, rest: str) -> str:
+    from .. import orchestrator
+
+    sha = rest.strip()
+    if not sha:
+        return "사용법: <code>/revert &lt;커밋해시&gt;</code>  (<code>/reverts</code>로 목록)"
+    r = orchestrator.revert(conn, sha)
+    if not r.get("ok"):
+        return f"❌ 되돌리기 실패 — {html.escape(str(r.get('reason'))[:200])}"
+    return (
+        f"↩️ <code>{sha}</code>를 되돌렸습니다.\n"
+        f"되돌림 커밋 <code>{r['commit']}</code>\n"
+        "<i>되돌림도 커밋으로 남습니다.</i>"
+    )
+
+
+def _cmd_plan(conn: sqlite3.Connection, rest: str) -> str:
+    """고장 큐를 읽어 계획을 세운다. 위험도가 low면 승인 없이 바로 반영된다."""
+    import subprocess
+
+    from ..paths import CODE_ROOT
+
+    subprocess.Popen(
+        [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "plan", "--limit", "1"],
+        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return (
+        "🧭 수정 계획을 세웁니다 (Opus 5).\n"
+        "<i>위험도가 낮으면 승인 없이 바로 고치고 커밋 메시지를 보내드립니다. "
+        "그 밖은 승인 버튼을 보내드립니다.</i>\n\n"
+        "<i>계획을 세우는 동안 자동지원은 잠시 멈춥니다.</i>"
+    )
+
+
 def _cmd_improve(conn: sqlite3.Connection, rest: str) -> str:
     """개발 지시 큐 + 자체진단을 지금 처리한다.
 
@@ -413,6 +602,16 @@ def _handle(conn: sqlite3.Connection, text: str) -> str:
         return _cmd_apply_start(conn, stripped[len(cmd):].strip())
     if cmd == "/improve":
         return _cmd_improve(conn, stripped[len(cmd):].strip())
+    if cmd == "/plan":
+        return _cmd_plan(conn, stripped[len(cmd):].strip())
+    if cmd == "/errors":
+        return _cmd_errors(conn, stripped[len(cmd):].strip())
+    if cmd == "/plans":
+        return _cmd_plans(conn, stripped[len(cmd):].strip())
+    if cmd == "/reverts":
+        return _cmd_reverts(conn, stripped[len(cmd):].strip())
+    if cmd == "/revert":
+        return _cmd_revert(conn, stripped[len(cmd):].strip())
     if cmd == "/stop":
         return _cmd_stop(conn, stripped[len(cmd):].strip())
 
@@ -566,6 +765,62 @@ def _start_revision(conn: sqlite3.Connection, job_id: str, feedback: str) -> Non
     )
 
 
+def _handle_fix_callback(conn: sqlite3.Connection, cb_id: str, data: str) -> None:
+    """수정 계획 승인/거절.
+
+    거절이 단순히 "안 함"으로 끝나면 안 된다 — 자가복구가 붙잡아 둔 자동지원
+    보류가 그대로 남아 파이프라인이 영영 안 돈다. 거절도 **푸는 동작**이다.
+    """
+    import subprocess
+
+    from ..paths import CODE_ROOT
+
+    try:
+        _, verb, raw_id = data.split(":", 2)
+        plan_id = int(raw_id)
+    except (ValueError, IndexError):
+        telegram.answer_callback(conn, cb_id, "잘못된 버튼입니다")
+        return
+
+    row = conn.execute("SELECT status, title FROM fix_plans WHERE id=?", (plan_id,)).fetchone()
+    if row is None:
+        telegram.answer_callback(conn, cb_id, "없는 계획입니다")
+        return
+    if row["status"] not in ("pending", "demoted"):
+        telegram.answer_callback(conn, cb_id, f"이미 {row['status']} 상태입니다")
+        notify(conn, f"ℹ️ 계획 #{plan_id}은 이미 <b>{row['status']}</b> 상태입니다.")
+        return
+
+    if verb == "no":
+        conn.execute(
+            "UPDATE fix_plans SET status='rejected', decided_at=? WHERE id=?", (now(), plan_id)
+        )
+        conn.commit()
+        release_fix_hold(conn)
+        telegram.answer_callback(conn, cb_id, "거절했습니다")
+        notify(
+            conn,
+            f"❌ 계획 #{plan_id}을 거절했습니다 — <i>{html.escape(row['title'] or '')}</i>\n"
+            "<i>자동지원 보류를 풀었습니다. 고장은 큐에 그대로 남습니다.</i>",
+        )
+        return
+
+    conn.execute(
+        "UPDATE fix_plans SET status='approved', decided_at=? WHERE id=?", (now(), plan_id)
+    )
+    conn.commit()
+    telegram.answer_callback(conn, cb_id, "수행을 시작합니다")
+    notify(conn, f"🔧 계획 #{plan_id} 수행을 시작합니다 — 끝나면 알려드립니다.")
+
+    # 수행은 코딩 에이전트라 수 분~수십 분이다. 수신 루프를 막으면 그동안 온
+    # 다른 버튼을 못 받는다(/guide·/apply와 같은 이유).
+    subprocess.Popen(
+        [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "fix-run", str(plan_id)],
+        cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+
 def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
     """승인 버튼 처리. `apply:<job_id>` 면 실제로 제출한다.
 
@@ -604,6 +859,18 @@ def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
             "<i>예: 인프라 경험 말고 백엔드 API 설계를 앞에 세워줘</i>\n\n"
             "취소하려면 <code>취소</code> 라고 보내세요.",
         )
+        return
+
+    # 수정 계획 승인 — 코드를 고치기 시작하는 지점이다. 결과는 브랜치에만 남고
+    # main에는 안 닿는다(자동반영은 위험도 low일 때만, 승인 없이 따로 간다).
+    if data.startswith("fix:"):
+        _handle_fix_callback(conn, cb_id, data)
+        return
+
+    if data.startswith("revert:"):
+        sha = data.split(":", 1)[1]
+        telegram.answer_callback(conn, cb_id, "되돌리는 중…")
+        notify(conn, _cmd_revert(conn, sha))
         return
 
     if not data.startswith(("submit:", "apply:")):

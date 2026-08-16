@@ -105,7 +105,11 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("running", "지금 도는 작업"),
     ("stop", "도는 작업 중단 (강제: /stop 강제)"),
     ("apply", "지원준비를 지금 바로 (수집은 낮 12시에 따로)"),
-    ("improve", "개발 지시 큐 + 자체진단을 지금 처리"),
+    ("errors", "고장 큐"),
+    ("plan", "지금 수정 계획을 세운다"),
+    ("plans", "수정 계획 목록과 상태"),
+    ("reverts", "자동반영된 커밋 목록"),
+    ("improve", "수정 계획 (plan의 옛 이름)"),
     ("pause", "자동지원 정지"),
     ("resume", "재개"),
     ("queue", "개발 지시 큐"),
@@ -218,6 +222,31 @@ def notify(conn: sqlite3.Connection, text: str) -> bool:
         return False
     except Exception as e:  # noqa: BLE001
         log.warning("텔레그램 알림 실패(무시): %s", e)
+        return False
+
+
+def notify_with_buttons(
+    conn: sqlite3.Connection, text: str, buttons: list[list[dict[str, str]]]
+) -> bool:
+    """버튼이 붙은 텍스트 알림. `send_photo`의 사진 없는 판이다.
+
+    승인 게이트가 늘 사진을 갖고 있는 건 아니다 — 지원서 검토는 채워진 폼
+    사진으로 판단하지만, 수정 계획 승인은 글로 판단한다. 그때 `notify()`를
+    쓰면 버튼이 통째로 사라져서 **누를 것이 없는 승인 요청**이 도착한다.
+    """
+    try:
+        token, chat = _creds(conn)
+        _call(
+            token, "sendMessage", chat_id=chat, text=text[:4096],
+            parse_mode="HTML", disable_web_page_preview=True,
+            reply_markup={"inline_keyboard": buttons},
+        )
+        return True
+    except TelegramNotConfigured:
+        log.info("텔레그램 미설정 — 알림 건너뜀: %s", text[:50])
+        return False
+    except Exception as e:  # noqa: BLE001
+        log.warning("버튼 알림 실패(무시): %s", e)
         return False
 
 

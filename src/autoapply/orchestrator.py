@@ -18,19 +18,48 @@ B의 입력은 둘이다:
 경우가 대부분이고, 무엇보다 사람이 방향을 바꾸려는데 자기 할 일을 먼저 하는
 오케스트레이터는 통제 불가능하다.
 
-## main에 절대 닿지 않는다
+## 계획과 수행을 다른 세션으로 가른다
 
-코드 수정은 **검증 오라클이 없는 영역**이다. 레시피는 dry-run 스크린샷으로 맞는지
-볼 수 있지만, `applicability.py`를 고쳤을 때 그게 맞는지 확인할 방법이 없다.
-틀리면 엉뚱한 회사에 지원이 나간다. 그래서:
+    plan()      읽기 전용. 무엇이 왜 깨졌고 어떻게 고칠지 + 위험도를 낸다
+    execute()   그 계획만 읽고 새 세션에서 고친다
 
-    1. 전용 브랜치(auto/<id>)에서만 작업한다
-    2. push하지 않는다
-    3. 끝나면 원래 브랜치로 돌아온다
-    4. 작업 트리가 더러우면 아예 시작하지 않는다
+세션을 가르는 이유는 **승인 지연**이다. 새벽 3시에 만든 계획의 승인 버튼은
+아침에나 눌린다 — 한 세션이 그동안 떠 있을 수 없다. 계획을 `fix_plans`에
+굳혀두면 계획 세션은 그 자리에서 끝나고, 승인이 왔을 때 새 프로세스가
+이어받는다. 덤으로 계획 세션이 코드를 뒤지며 쌓은 컨텍스트(수십 파일)가
+수행 세션에 안 딸려온다.
 
-사람이 브랜치를 보고 병합한다. 자는 동안 보낸 한 줄이 검증 없이 main에 들어가는
-일은 없다.
+## main에 무엇이 가고 무엇이 안 가나
+
+예전에는 "코드 수정은 main에 절대 안 닿는다"였다. 그 규칙에는 대가가 있었다 —
+새벽에 셀렉터가 깨지면 브랜치에 수정이 쌓일 뿐, **다음 사이클은 여전히 깨진
+코드로 돈다.** 사람이 아침에 병합할 때까지 그 밤이 통째로 날아간다.
+
+지금은 위험도로 가른다:
+
+    low + 검증 통과 + 결정론 검사 통과   →  main에 커밋. 다음 사이클이 고쳐진 채 돈다
+    그 밖 전부                          →  브랜치에만. 사람이 보고 병합한다
+
+**위험도는 에이전트의 자기 채점이다.** 낮게 매기고 틀리는 경우를 막는 건 그
+점수가 아니라 실행 결과다. 그래서 자동반영에는 조건 셋이 다 필요하다 —
+계획이 low라고 말했고, 계획에 적힌 **검증 명령이 실제로 통과**했고,
+`_auto_gate()`의 결정론 검사를 지났을 때만 간다.
+
+## 자동반영이라도 절대 안 건드리는 세 곳
+
+`_auto_gate()`가 커밋 직전 diff를 훑어 막는다. 셋 다 틀리면 **바깥세상에
+되돌릴 수 없는 결과**를 남긴다 — 되돌릴 수 있는 코드 실수와는 무게가 다르다.
+
+    제출 경로     엉뚱한 회사에 지원이 나간다
+    폭주 방어선   200곳에 연달아 지원이 나간다
+    중복 방어선   같은 곳에 두 번 지원한다
+
+## 도는 동안 자동지원을 붙잡는다
+
+고장 난 채로 지원을 계속 내보내면 고치는 중에도 같은 고장으로 자리가 소모된다.
+`hold_for_fix()`로 붙잡고 끝나면 푼다. 사람이 건 `/pause`와 **다른 열쇠**를
+쓴다 — 하나로 합치면 자가복구가 끝나며 푸는 순간 사람이 걸어둔 정지까지 같이
+풀린다.
 """
 
 from __future__ import annotations
@@ -38,6 +67,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -51,8 +81,23 @@ from .paths import CODE_ROOT
 
 log = logging.getLogger(__name__)
 
-# 코딩 에이전트에게 허용하는 도구. 바깥으로 뭘 보내는 도구는 주지 않는다.
-AGENT_TOOLS = "Read,Edit,Write,Grep,Glob,Bash"
+# 계획은 **읽기만** 한다. Edit/Write를 주지 않는 이유는 단순하다 — 계획 단계에서
+# 코드가 바뀌면 그 뒤의 위험도 판정과 검증이 전부 헛것이 된다. 무엇을 고칠지
+# 정하는 눈과 고치는 손은 갈라야 한다.
+PLANNER_TOOLS = "Read,Grep,Glob,Bash"
+FIXER_TOOLS = "Read,Edit,Write,Grep,Glob,Bash"
+
+# 하네스. 띄우는 에이전트에게만 건다 — 프로젝트 settings.json에 넣으면 사람의
+# 대화형 세션까지 같이 묶여서, 자기 저장소에서 git push를 못 하게 된다.
+GUARD_SETTINGS = ".claude/agent-guard.json"
+
+# 검증 명령으로 허용하는 것. 계획이 문자열로 준 명령을 그대로 셸에 넘기면
+# 계획 에이전트가 사실상 임의 실행 권한을 갖는다 — 하네스는 에이전트의 Bash를
+# 막지 이 자리를 막지 않는다. 그래서 cli.py의 **읽기·dry-run 명령만** 통과시킨다.
+VERIFY_ALLOWED = re.compile(
+    r"^(?:\.venv/bin/)?python3?\s+cli\.py\s+"
+    r"(resume|apply|builds|health|status|blocked|targets|quota|errors|llm-cost|where)\b"
+)
 
 # 에이전트가 증적 스크린샷을 읽을 수 있어야 한다. 화면을 안 보고 셀렉터를 고치는
 # 것은 추측이고, 이 프로젝트에서 추측으로 고친 것은 대부분 틀렸다.
@@ -61,14 +106,36 @@ EVIDENCE_HINT = (
     "화면을 보지 않고 셀렉터를 바꾸지 마라."
 )
 
-SYSTEM = (
+_COMMON = (
     "당신은 이 저장소를 유지보수하는 개발자입니다. 저장소의 CLAUDE.md와 README를 "
     "먼저 읽고 설계 의도를 파악한 뒤 작업하십시오.\n"
     "원칙: 정규식·단순 파싱으로 되는 구간에 LLM을 넣지 마십시오. "
-    "되돌릴 수 없는 동작(실제 지원 제출)은 절대 실행하지 마십시오. "
-    "지시가 모호하면 가장 보수적인 해석을 택하고 무엇을 가정했는지 마지막에 적으십시오.\n"
-    "가능하면 변경을 검증하는 명령을 실제로 실행해 결과를 확인하십시오. "
-    "커밋은 하지 마십시오 — 호출자가 합니다.\n" + EVIDENCE_HINT
+    "되돌릴 수 없는 동작(실제 지원 제출)은 절대 실행하지 마십시오.\n" + EVIDENCE_HINT
+)
+
+PLANNER_SYSTEM = (
+    _COMMON
+    + "\n당신은 **계획만** 세웁니다. 코드를 고치지 마십시오 — 편집 도구가 없습니다.\n"
+    "원인을 추측하지 말고 실제로 파일을 읽어 확인하십시오. 근거 없이 쓴 계획은 "
+    "수행 단계에서 그대로 잘못된 수정이 됩니다.\n\n"
+    "위험도(risk)를 정직하게 매기십시오. 이 값으로 사람 승인 없이 반영할지가 "
+    "갈립니다:\n"
+    "  low    무엇이 잘못됐는지 확실하고, 고칠 범위가 좁고, 틀려도 dry-run 검증에서 "
+    "걸린다. 셀렉터·타임아웃·문구 수정이 대개 여기다\n"
+    "  medium 원인은 알겠으나 판정·조립 로직처럼 결과를 기계적으로 확인하기 어려운 곳\n"
+    "  high   원인이 불확실하거나, 지원 제출·중복차단·한도처럼 틀리면 바깥세상에 "
+    "되돌릴 수 없는 결과를 남기는 곳\n\n"
+    "확신이 없으면 낮게 매기지 마십시오. low로 잘못 매긴 수정은 사람이 자는 동안 "
+    "그대로 반영됩니다."
+)
+
+FIXER_SYSTEM = (
+    _COMMON
+    + "\n승인된 계획을 그대로 수행하십시오. 계획에 없는 것을 덤으로 고치지 마십시오 — "
+    "무엇이 무엇을 깨뜨렸는지 못 가리게 됩니다.\n"
+    "수행 중 계획이 틀렸다는 것을 알게 되면, 억지로 맞추지 말고 무엇이 달랐는지 "
+    "마지막에 적고 최소한의 수정만 하십시오.\n"
+    "커밋은 하지 마십시오 — 호출자가 합니다."
 )
 
 
@@ -275,9 +342,52 @@ def self_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return items
 
 
+def _error_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """고장 큐를 할 일로 바꾼다.
+
+    `self_items()`와 겹치지 않는다. 저쪽은 **미리 정의한 증상**(플랫폼별 지원실패
+    2건 이상, fill_report 이상)을 보고, 이쪽은 **처음 보는 고장**을 본다. 실제로
+    이 저장소에서 잡힌 고장의 상당수가 저쪽 정의에 안 걸리는 종류였다.
+    """
+    from . import errors
+
+    items: list[dict[str, Any]] = []
+    for e in errors.open_items(conn):
+        ctx = e.get("context") or {}
+        shot = ctx.get("evidence_path") or ""
+        brief = _vision_brief(
+            shot,
+            "이 화면은 자동화가 실패한 순간이다. 보이는 것만 사실대로 적어라:\n"
+            "1. 어떤 페이지인가\n2. 오류·경고 문구가 있으면 그대로\n"
+            "3. 버튼과 입력칸의 이름\n4. 로그인이 풀린 정황이 있는가\n추측하지 마라.",
+        )
+        items.append({
+            "source": "error",
+            "error_id": e["id"],
+            "title": f"{e['exc_type']}: {(e['message'] or '')[:50]}",
+            "task": (
+                f"고장이 {e['count']}번 났다 (지문 {e['fingerprint']}).\n"
+                f"명령: {e['command']}\n"
+                f"예외: {e['exc_type']}: {e['message']}\n"
+                + (f"공고: {ctx['job_id']}\n" if ctx.get("job_id") else "")
+                + (f"증적 화면: {shot}\n" if shot else "")
+                + f"{brief}\n"
+                f"트레이스백:\n{(e.get('traceback') or '')[-2000:]}\n\n"
+                "트레이스백이 가리키는 파일을 **실제로 읽고** 원인을 확인하라. "
+                "추측으로 고치지 마라."
+            ),
+        })
+    return items
+
+
 def gather(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """사람 지시가 항상 먼저다."""
-    return _human_items(conn) + self_items(conn) + _editor_items(conn)
+    """사람 지시가 항상 먼저다.
+
+    시스템이 스스로 찾은 문제보다 사람이 아는 문제가 더 급한 경우가 대부분이고,
+    무엇보다 사람이 방향을 바꾸려는데 자기 할 일을 먼저 하는 오케스트레이터는
+    통제 불가능하다.
+    """
+    return _human_items(conn) + _error_items(conn) + self_items(conn) + _editor_items(conn)
 
 
 # ─────────────────────── 실행 ───────────────────────
@@ -290,94 +400,47 @@ def _git(*args: str, check: bool = True) -> str:
     return p.stdout.strip()
 
 
-def run(conn: sqlite3.Connection | None = None, *, limit: int = 1) -> dict[str, Any]:
-    """할 일을 모아 처리한다. 기본 1건인 이유: 브랜치가 쌓이면 사람이 검토를 못 한다."""
-    own = conn is None
-    conn = conn or connect()
-    try:
-        if not shutil.which("claude"):
-            return {"processed": 0, "reason": "claude CLI 없음"}
-        if _git("status", "--porcelain"):
-            return {"processed": 0, "reason": "작업 트리 변경 있음 — 다음 실행으로 미룸"}
+def _role_cfg(role: str) -> dict[str, Any]:
+    """모델·effort는 config.yaml에서 바꾼다. 기본은 둘 다 Opus 5 / effort 높음.
 
-        items = gather(conn)[:limit]
-        if not items:
-            return {"processed": 0, "reason": "할 일 없음"}
-
-        origin = _git("rev-parse", "--abbrev-ref", "HEAD")
-        return {"processed": len(items), "items": [_one(conn, it, origin) for it in items]}
-    finally:
-        if own:
-            conn.close()
+    둘을 따로 두는 이유: 나중에 한쪽만 내리고 싶어진다. 계획은 비싸도 정확해야
+    하고, 계획이 정확하면 수행은 더 싼 모델로도 된다.
+    """
+    cfg = effective_config().get("orchestrator", {}).get(role, {})
+    default_timeout = 1800 if role == "planner" else 3600
+    return {
+        "model": cfg.get("model", "claude-opus-5"),
+        "effort": cfg.get("effort", "high"),
+        "timeout": int(cfg.get("timeout_sec", default_timeout)),
+    }
 
 
-def _one(conn: sqlite3.Connection, item: dict[str, Any], origin: str) -> dict[str, Any]:
-    qid = item.get("queue_id")
-    slug = f"q{qid}" if qid else f"self{_git('rev-parse', '--short', 'HEAD')}"
-    branch = f"auto/{slug}"
-    result: dict[str, Any] = {"source": item["source"], "title": item["title"], "branch": branch}
+def _agent(task: str, *, role: str, system: str, tools: str) -> str:
+    """코딩 에이전트 한 번. 하네스를 반드시 걸고 부른다.
 
-    if qid:
-        conn.execute(
-            "UPDATE control_queue SET status='running', started_at=?, branch=? WHERE id=?",
-            (now(), branch, qid),
-        )
-        conn.commit()
-
-    try:
-        _git("switch", "-c", branch)
-        out = _agent(item["task"])
-
-        if _git("status", "--porcelain"):
-            _git("add", "-A")
-            _git("commit", "-q", "-m",
-                 f"[auto/{slug}] {item['title']}\n\n"
-                 f"출처: {item['source']}. 검토 후 병합할 것 — 자동 검증되지 않았다.")
-            result.update(status="done", diff=_git("show", "--stat", "--oneline", "HEAD")[:600])
-        else:
-            result.update(status="skipped", diff="변경 없음")
-        result["note"] = out[-600:]
-    except UsageLimited as e:
-        # 사용 한도. 실패로 기록하면 한도가 풀린 뒤에도 이 일을 다시 못 한다.
-        # 큐로 되돌리고 조용히 물러난다 — 다음 스케줄 실행이 이어받는다.
-        log.info("사용 한도 도달 — #%s 를 큐로 되돌린다", qid)
-        result.update(status="requeued", note=str(e)[:300], diff="")
-    except Exception as e:  # noqa: BLE001
-        log.warning("오케스트레이터 작업 실패 (%s): %s", item["title"], e)
-        result.update(status="failed", note=str(e)[:400], diff="")
-    finally:
-        # 무슨 일이 있어도 원래 브랜치로 돌아온다. 다음 사이클의 수집·판정이
-        # 검증 안 된 브랜치 위에서 돌면 안 된다.
-        _git("switch", origin, check=False)
-        if qid:
-            # requeued면 다시 queued로. 다음 실행이 처음부터 한다.
-            final = "queued" if result["status"] == "requeued" else result["status"]
-            conn.execute(
-                "UPDATE control_queue SET status=?, result=?, finished_at=? WHERE id=?",
-                (final, f"{result.get('diff','')}\n\n{result.get('note','')}"[:2000],
-                 None if final == "queued" else now(), qid),
-            )
-            conn.commit()
-
-    _report(conn, result, item)
-    return result
-
-
-def _agent(task: str) -> str:
-    cfg = effective_config().get("llm", {})
+    `--settings`로 거는 이유는 `.claude/settings.json`에 넣으면 사람의 대화형
+    세션까지 같이 묶이기 때문이다. 사람이 자기 저장소에서 git push를 못 하게
+    되는 건 말이 안 된다.
+    """
+    cfg = _role_cfg(role)
+    # 중첩 실행 표식을 지운다. 이게 남으면 자식 claude가 자기를 부모 세션의
+    # 일부로 여겨 엉뚱하게 동작한다.
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDECODE", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT")}
     cmd = [
         "claude", "-p", task,
-        "--model", cfg.get("control_model", cfg.get("model", "claude-sonnet-5")),
-        "--append-system-prompt", SYSTEM,
-        "--allowed-tools", AGENT_TOOLS,
+        "--model", cfg["model"],
+        "--effort", cfg["effort"],
+        "--append-system-prompt", system,
+        "--allowed-tools", tools,
+        "--settings", GUARD_SETTINGS,
         "--permission-mode", "acceptEdits",
         "--no-session-persistence",
     ]
+    log.info("%s 에이전트 시작 (model=%s, effort=%s)", role, cfg["model"], cfg["effort"])
     p = subprocess.run(
         cmd, cwd=CODE_ROOT, capture_output=True, text=True,
-        timeout=cfg.get("control_timeout_sec", 1800), check=False, env=env,
+        timeout=cfg["timeout"], check=False, env=env,
     )
     out = (p.stdout or "") + (p.stderr or "")
     # 한도는 고장이 아니다. 여기서 구분해야 큐로 되돌릴 수 있다.
@@ -385,18 +448,524 @@ def _agent(task: str) -> str:
     return out.strip()
 
 
-def _report(conn: sqlite3.Connection, r: dict[str, Any], item: dict[str, Any]) -> None:
-    if r["status"] == "requeued":
-        telegram.notify(
+# ─────────────────────── 계획 ───────────────────────
+
+PLAN_FORMAT = """
+마지막에 아래 JSON을 ```json 코드블록 하나로 출력하라. 설명은 그 앞에 쓴다.
+
+```json
+{
+  "title": "한 줄 제목",
+  "cause": "실제로 파일을 읽고 확인한 원인",
+  "files": ["고칠 파일 경로"],
+  "steps": ["무엇을 어떻게 고칠지 단계별로"],
+  "verify": "python cli.py resume 283",
+  "risk": "low",
+  "risk_reason": "왜 그 위험도인지"
+}
+```
+
+`verify`는 **실제로 돌릴 수 있는 한 줄 명령**이어야 한다. 다음만 쓸 수 있다:
+`python cli.py` 의 resume / apply / builds / health / status / blocked / targets /
+quota / errors / llm-cost / where. `--live` 는 절대 쓰지 마라 — 실제 지원이 나간다.
+검증할 방법이 마땅치 않으면 verify를 빈 문자열로 두고 risk를 medium 이상으로 매겨라.
+"""
+
+
+def _parse_plan(text: str) -> dict[str, Any]:
+    """계획 JSON을 꺼낸다. 못 꺼내면 사람이 보게 만든다.
+
+    파싱 실패를 low로 흘려보내면 안 된다 — 무엇을 하겠다는 건지 기계가 못 읽은
+    계획이 승인 없이 main에 반영되는 것이 최악이다. 그래서 실패는 high로 굳힌다.
+    """
+    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if not blocks:
+        # 코드블록 없이 낸 경우까지는 봐준다 — 마지막 중괄호 덩어리를 시도한다.
+        blocks = re.findall(r"(\{[^{}]*\"risk\"[^{}]*\})", text, re.DOTALL)
+    for raw in reversed(blocks):
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        risk = str(d.get("risk", "high")).lower()
+        return {
+            "title": str(d.get("title") or "제목 없음")[:120],
+            "cause": str(d.get("cause") or "")[:2000],
+            "files": d.get("files") or [],
+            "steps": d.get("steps") or [],
+            "verify": str(d.get("verify") or "").strip(),
+            "risk": risk if risk in ("low", "medium", "high") else "high",
+            "risk_reason": str(d.get("risk_reason") or "")[:500],
+            "parsed": True,
+        }
+    return {
+        "title": "계획을 읽지 못했습니다 — 사람이 확인 필요",
+        "cause": "", "files": [], "steps": [], "verify": "",
+        "risk": "high", "risk_reason": "계획 JSON 파싱 실패", "parsed": False,
+    }
+
+
+def plan(conn: sqlite3.Connection | None = None, *, limit: int = 1) -> dict[str, Any]:
+    """할 일 하나를 골라 계획을 세운다. 코드는 건드리지 않는다.
+
+    한 번에 하나만 하는 이유는 예전 `run()`과 같다 — 여러 개를 동시에 하면
+    무엇이 무엇을 깨뜨렸는지 못 가린다. 게다가 계획마다 승인이 필요하므로
+    여러 개를 한꺼번에 올리면 폰이 도배된다.
+    """
+    from .notify.listener import hold_for_fix, release_fix_hold
+
+    own = conn is None
+    conn = conn or connect()
+    try:
+        if not shutil.which("claude"):
+            return {"planned": 0, "reason": "claude CLI 없음"}
+
+        items = gather(conn)[:limit]
+        if not items:
+            return {"planned": 0, "reason": "할 일 없음"}
+        item = items[0]
+
+        # 고장 난 채로 지원을 계속 내보내지 않는다. 계획 단계부터 붙잡는 이유는
+        # 계획이 수 분 걸리고 그 사이에도 새벽 루프가 자리를 소모하기 때문이다.
+        hold_for_fix(conn, None, item["title"])
+
+        try:
+            out = _agent(
+                f"{item['task']}\n\n{PLAN_FORMAT}",
+                role="planner", system=PLANNER_SYSTEM, tools=PLANNER_TOOLS,
+            )
+        except UsageLimited as e:
+            release_fix_hold(conn)
+            telegram.notify(conn, f"⏳ 사용 한도 — 계획을 다음으로 미룹니다.\n<i>{e}</i>")
+            return {"planned": 0, "reason": "사용 한도"}
+        except Exception as e:  # noqa: BLE001
+            release_fix_hold(conn)
+            log.warning("계획 수립 실패: %s", e)
+            telegram.notify(conn, f"❌ 계획 수립 실패 — <i>{type(e).__name__}: {str(e)[:200]}</i>")
+            return {"planned": 0, "reason": str(e)[:200]}
+
+        parsed = _parse_plan(out)
+        plan_id = _save_plan(conn, item, parsed, out)
+        hold_for_fix(conn, plan_id, parsed["title"])
+        _mark_sources(conn, item, "planned", plan_id)
+
+        # low는 사람을 깨우지 않고 바로 고친다. 그게 이 기능의 목적이다 —
+        # 새벽에 깨져도 아침엔 고쳐진 채로 돌아 있어야 한다.
+        if parsed["risk"] == "low":
+            log.info("위험도 low — 승인 없이 수행한다 (계획 #%s)", plan_id)
+            conn.execute("UPDATE fix_plans SET auto=1 WHERE id=?", (plan_id,))
+            conn.commit()
+            return {"planned": 1, "plan_id": plan_id, "risk": "low",
+                    "execute": execute(conn, plan_id)}
+
+        _request_approval(conn, plan_id, parsed)
+        return {"planned": 1, "plan_id": plan_id, "risk": parsed["risk"], "awaiting": True}
+    finally:
+        if own:
+            conn.close()
+
+
+def _save_plan(
+    conn: sqlite3.Connection, item: dict[str, Any], parsed: dict[str, Any], raw: str
+) -> int:
+    sources = [{"source": item["source"], "queue_id": item.get("queue_id"),
+                "error_id": item.get("error_id"), "title": item["title"]}]
+    cur = conn.execute(
+        """INSERT INTO fix_plans
+             (created_at, sources, title, cause, files, steps, verify, raw, risk)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (now(), json.dumps(sources, ensure_ascii=False), parsed["title"], parsed["cause"],
+         json.dumps(parsed["files"], ensure_ascii=False),
+         json.dumps(parsed["steps"], ensure_ascii=False),
+         parsed["verify"], raw[-8000:], parsed["risk"]),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _mark_sources(
+    conn: sqlite3.Connection, item: dict[str, Any], status: str, plan_id: int | None
+) -> None:
+    """계획/수행 결과를 원래 출처에 되돌려 적는다. 이게 없으면 같은 고장으로
+    계획이 계속 다시 만들어진다."""
+    if item.get("error_id"):
+        from . import errors
+
+        errors.mark(conn, [int(item["error_id"])], status, plan_id)
+    if item.get("queue_id"):
+        conn.execute(
+            "UPDATE control_queue SET status=? WHERE id=?",
+            ("running" if status == "planned" else status, item["queue_id"]),
+        )
+        conn.commit()
+
+
+# ─────────────────────── 자동반영 관문 ───────────────────────
+
+# 자동반영이 절대 손대면 안 되는 곳. 계획이 low라고 말해도 여기 걸리면 내린다.
+#
+# 셋 다 틀렸을 때 **바깥세상에 되돌릴 수 없는 결과**를 남긴다는 공통점이 있다.
+# 코드 실수는 되돌리면 그만이지만, 나간 지원서는 회수가 안 된다.
+AUTO_FORBIDDEN_PATHS = (
+    "src/autoapply/agent.py",        # claim() — 중복·폭주 방어선
+    "src/autoapply/db.py",           # apply_ledger UNIQUE — 스키마 방어선
+    "src/autoapply/runner/apply.py",  # 제출 경로
+    "config.yaml",                   # limits
+)
+
+AUTO_FORBIDDEN_PATTERNS = (
+    (r"max_per_(day|run)", "일일·회차 지원 상한"),
+    (r"--live|mark_submitted|def _submit", "실제 제출 경로"),
+    (r"canonical_key", "중복지원 차단 키"),
+    (r"def claim|_claimed_today", "선점 관문"),
+)
+
+
+def _auto_gate(diff: str) -> tuple[bool, str]:
+    """이 변경을 승인 없이 main에 넣어도 되나. 결정론 검사다.
+
+    위험도는 에이전트의 자기 채점이라, 낮게 매기고 틀리는 경우를 여기서 막는다.
+    막히면 실패가 아니라 **강등**이다 — 브랜치에 남기고 사람에게 묻는다.
+    """
+    files = re.findall(r"^\+\+\+ b/(.+)$", diff, re.MULTILINE)
+    for f in files:
+        if f in AUTO_FORBIDDEN_PATHS:
+            return False, f"{f}는 지원·중복·한도 방어선이 있는 파일"
+
+    # 파일이 허용 목록이어도 내용이 방어선을 건드릴 수 있다(옮겨온 코드 등).
+    changed = "\n".join(
+        ln for ln in diff.splitlines() if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))
+    )
+    for pattern, label in AUTO_FORBIDDEN_PATTERNS:
+        if re.search(pattern, changed):
+            return False, f"방어선을 건드림 — {label}"
+    return True, ""
+
+
+def _run_verify(command: str) -> tuple[bool, str]:
+    """계획이 적어준 검증 명령을 실제로 돌린다.
+
+    임의 문자열을 셸에 넘기지 않는다. 그러면 계획 에이전트가 사실상 임의 실행
+    권한을 갖는다 — 하네스는 **에이전트의 Bash**를 막지 이 자리를 막지 않는다.
+    허용 목록에 없으면 실행하지 않고 "검증 못 함"으로 돌려보내며, 그건 곧
+    자동반영 자격 없음이다.
+    """
+    import shlex
+
+    cmd = (command or "").strip()
+    if not cmd:
+        return False, "검증 명령이 없다"
+    if "--live" in cmd:
+        return False, "검증 명령에 --live가 있다 — 실행하지 않는다"
+    # shell=False로 돌리므로 `;`나 `|`가 실제로 두 번째 명령이 되지는 않는다.
+    # 그래도 막는 이유는 그런 문자열이 왔다는 것 자체가 계획이 셸을 기대했다는
+    # 뜻이고, 그 계획은 검증이 무엇을 확인하는지 잘못 알고 있다는 신호다.
+    if re.search(r"[;&|`$><]|\$\(", cmd):
+        return False, f"검증 명령에 셸 문법이 섞여 있다: {cmd[:80]}"
+    if not VERIFY_ALLOWED.match(cmd):
+        return False, f"허용되지 않은 검증 명령: {cmd[:80]}"
+
+    argv = shlex.split(cmd)
+    if argv[0].startswith("python"):
+        argv[0] = str(CODE_ROOT / ".venv/bin/python")
+    try:
+        p = subprocess.run(
+            argv, cwd=CODE_ROOT, capture_output=True, text=True, timeout=1800, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return False, "검증 명령이 30분 안에 끝나지 않았다"
+    tail = ((p.stdout or "") + (p.stderr or ""))[-800:]
+    return p.returncode == 0, tail
+
+
+def _backup_db() -> str:
+    """수행 전에 DB를 복사해 둔다. 하네스가 뚫려도 되돌릴 수 있는 마지막 줄이다."""
+    from pathlib import Path
+
+    from .paths import DATA_DIR, DB_PATH
+
+    if not DB_PATH.exists():
+        return ""
+    backup_dir = DATA_DIR / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    dest = backup_dir / f"jobs-{now().replace(':', '').replace('-', '')[:15]}.db"
+    shutil.copy2(DB_PATH, dest)
+
+    keep = sorted(backup_dir.glob("jobs-*.db"))[:-5]
+    for old in keep:
+        Path(old).unlink(missing_ok=True)
+    return str(dest)
+
+
+# ─────────────────────── 수행 ───────────────────────
+
+
+def execute(conn: sqlite3.Connection | None = None, plan_id: int = 0) -> dict[str, Any]:
+    """승인됐거나 low로 판정된 계획을 실제로 수행한다.
+
+    계획 세션과 **다른 프로세스**에서 도는 것이 정상이다 — 승인 버튼은 몇 시간
+    뒤에 눌리고, 그때 이 함수만 계획을 읽고 시작한다.
+    """
+    from .notify.listener import release_fix_hold
+
+    own = conn is None
+    conn = conn or connect()
+    try:
+        row = conn.execute("SELECT * FROM fix_plans WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            return {"error": f"계획 {plan_id}이 없다"}
+        if row["status"] in ("done", "rejected", "running"):
+            return {"skipped": f"이미 {row['status']} 상태"}
+
+        if _git("status", "--porcelain"):
+            # 사람의 미커밋 작업 위에 에이전트를 풀어놓지 않는다.
+            telegram.notify(
+                conn, f"⏸ 계획 #{plan_id} 수행을 미룹니다 — 작업 트리에 커밋 안 된 변경이 있습니다."
+            )
+            return {"skipped": "작업 트리 변경 있음"}
+
+        origin = _git("rev-parse", "--abbrev-ref", "HEAD")
+        branch = f"auto/fix{plan_id}"
+        conn.execute(
+            "UPDATE fix_plans SET status='running', branch=? WHERE id=?", (branch, plan_id)
+        )
+        conn.commit()
+
+        backup = _backup_db()
+        result: dict[str, Any] = {"plan_id": plan_id, "branch": branch, "backup": backup}
+
+        try:
+            _git("switch", "-c", branch)
+            out = _agent(_fixer_task(row), role="fixer", system=FIXER_SYSTEM, tools=FIXER_TOOLS)
+            result["note"] = out[-800:]
+
+            if not _git("status", "--porcelain"):
+                result.update(status="skipped", reason="에이전트가 아무것도 바꾸지 않았다")
+            else:
+                _git("add", "-A")
+                _git("commit", "-q", "-m", _commit_message(row))
+                result.update(_land(conn, row, origin, branch))
+        except UsageLimited as e:
+            # 한도는 고장이 아니다. 계획을 살려두고 물러난다.
+            result.update(status="requeued", reason=str(e)[:200])
+            conn.execute(
+                "UPDATE fix_plans SET status=? WHERE id=?",
+                ("approved" if row["auto"] == 0 else "pending", plan_id),
+            )
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            log.warning("수행 실패 (계획 #%s): %s", plan_id, e)
+            result.update(status="failed", reason=f"{type(e).__name__}: {str(e)[:300]}")
+        finally:
+            # 무슨 일이 있어도 원래 브랜치로 돌아온다. 다음 사이클의 수집·판정이
+            # 검증 안 된 브랜치 위에서 돌면 안 된다.
+            _git("switch", origin, check=False)
+
+        if result.get("status") != "requeued":
+            conn.execute(
+                "UPDATE fix_plans SET status=?, result=?, finished_at=?, commit_sha=? WHERE id=?",
+                (result.get("status", "failed"), json.dumps(result, ensure_ascii=False)[:4000],
+                 now(), result.get("commit_sha"), plan_id),
+            )
+            conn.commit()
+            _resolve_sources(conn, row, result)
+
+        # 고쳤든 못 고쳤든 파이프라인은 놓아준다. 붙잡은 채로 두면 다음 새벽이
+        # 통째로 안 돈다 — 고장 하나가 파이프라인 전체를 인질로 잡는 꼴이다.
+        release_fix_hold(conn)
+        _report_result(conn, row, result)
+        return result
+    finally:
+        if own:
+            conn.close()
+
+
+def _land(
+    conn: sqlite3.Connection, row: sqlite3.Row, origin: str, branch: str
+) -> dict[str, Any]:
+    """커밋된 수정을 어디에 착지시킬지 정한다. main이냐 브랜치냐."""
+    diff = _git("show", "HEAD", "--unified=0")
+    stat = _git("show", "--stat", "--oneline", "HEAD")[:600]
+
+    if row["risk"] != "low":
+        return {"status": "done", "landed": "branch", "stat": stat,
+                "reason": f"위험도 {row['risk']} — 사람이 병합한다"}
+
+    gate_ok, gate_reason = _auto_gate(diff)
+    if not gate_ok:
+        return {"status": "demoted", "landed": "branch", "stat": stat,
+                "reason": f"자동반영 불가: {gate_reason}"}
+
+    verify_ok, verify_out = _run_verify(row["verify"])
+    if not verify_ok:
+        return {"status": "demoted", "landed": "branch", "stat": stat,
+                "reason": f"검증 실패: {verify_out[-300:]}"}
+
+    # 세 관문을 다 지났다. main으로 보낸다 — 다음 사이클이 고쳐진 채 돈다.
+    _git("switch", origin)
+    _git("merge", "--ff-only", branch)
+    sha = _git("rev-parse", "--short", "HEAD")
+    log.info("자동반영 — %s 를 %s 에 병합 (%s)", branch, origin, sha)
+    return {"status": "done", "landed": "main", "stat": stat, "commit_sha": sha,
+            "verify": verify_out[-300:]}
+
+
+def _fixer_task(row: sqlite3.Row) -> str:
+    steps = "\n".join(f"  {i}. {s}" for i, s in enumerate(json.loads(row["steps"] or "[]"), 1))
+    files = ", ".join(json.loads(row["files"] or "[]"))
+    return (
+        f"승인된 수정 계획을 수행하라.\n\n"
+        f"제목: {row['title']}\n"
+        f"원인: {row['cause']}\n"
+        f"고칠 파일: {files}\n"
+        f"단계:\n{steps}\n\n"
+        f"끝나면 이 명령이 통과해야 한다: {row['verify'] or '(검증 명령 없음)'}\n\n"
+        "계획에 없는 것을 덤으로 고치지 마라. 커밋은 하지 마라 — 호출자가 한다."
+    )
+
+
+def _commit_message(row: sqlite3.Row) -> str:
+    """폰으로 나가는 것이 이 메시지다. 무엇을 했는지가 아니라 왜 그랬는지를 적는다."""
+    steps = json.loads(row["steps"] or "[]")
+    body = "\n".join(f"- {s}" for s in steps[:6])
+    return (
+        f"{row['title']}\n\n"
+        f"{row['cause']}\n\n"
+        f"{body}\n\n"
+        f"자가복구 계획 #{row['id']} (위험도 {row['risk']}). "
+        f"검증: {row['verify'] or '없음'}"
+    )
+
+
+# ─────────────────────── 보고 ───────────────────────
+
+
+def _resolve_sources(conn: sqlite3.Connection, row: sqlite3.Row, result: dict[str, Any]) -> None:
+    """고장 큐에서 뺀다. **main에 실제로 반영됐을 때만** fixed로 끈다.
+
+    브랜치에만 있는 수정은 아직 아무것도 고치지 않은 것이다 — 다음 사이클은
+    여전히 깨진 코드로 돈다. 그걸 fixed로 끄면 같은 고장이 다시 나도 "이미
+    고쳤다"며 큐에 안 올라온다.
+    """
+    from . import errors
+
+    landed = result.get("landed") == "main" and result.get("status") == "done"
+    status = "fixed" if landed else "open"
+    for src in json.loads(row["sources"] or "[]"):
+        if src.get("error_id"):
+            errors.mark(conn, [int(src["error_id"])], status, row["id"])
+        if src.get("queue_id"):
+            conn.execute(
+                "UPDATE control_queue SET status=?, result=?, finished_at=? WHERE id=?",
+                ("done" if landed else "queued", result.get("stat", "")[:2000],
+                 now() if landed else None, src["queue_id"]),
+            )
+            conn.commit()
+
+
+def _request_approval(conn: sqlite3.Connection, plan_id: int, parsed: dict[str, Any]) -> bool:
+    """승인을 요청한다. 새벽이면 아침까지 쌓아둔다.
+
+    새벽 3시에 폰을 울려도 답이 안 온다 — 그럴 거면 울리지 않는 편이 낫다.
+    `pending_notifications`에 쌓고 09:00 `flush-notify`가 순서대로 보낸다.
+    지원 준비 알림이 쓰던 배선을 그대로 쓴다.
+    """
+    import html
+    from datetime import datetime
+
+    steps = "\n".join(f"  {i}. {html.escape(str(s)[:100])}"
+                      for i, s in enumerate(parsed["steps"][:5], 1))
+    icon = {"medium": "🟡", "high": "🔴"}.get(parsed["risk"], "🟢")
+    text = (
+        f"{icon} <b>수정 계획 #{plan_id}</b> — 승인이 필요합니다\n\n"
+        f"<b>{html.escape(parsed['title'])}</b>\n"
+        f"<i>{html.escape(parsed['cause'][:300])}</i>\n\n"
+        f"{steps}\n\n"
+        f"고칠 파일: <code>{html.escape(', '.join(parsed['files'][:5]) or '미정')}</code>\n"
+        f"검증: <code>{html.escape(parsed['verify'] or '없음')}</code>\n"
+        f"위험도 <b>{parsed['risk']}</b> — {html.escape(parsed['risk_reason'][:200])}\n\n"
+        "<i>승인하면 전용 브랜치에서 작업합니다. main에는 안 닿습니다.</i>"
+    )
+    buttons = [[
+        {"text": "✅ 승인", "callback_data": f"fix:ok:{plan_id}"},
+        {"text": "❌ 거절", "callback_data": f"fix:no:{plan_id}"},
+    ]]
+
+    hour = datetime.now().astimezone().hour
+    if 2 <= hour < 9:
+        conn.execute(
+            "INSERT INTO pending_notifications (caption, buttons, created_at) VALUES (?,?,?)",
+            (text, json.dumps(buttons, ensure_ascii=False), now()),
+        )
+        conn.commit()
+        log.info("새벽이라 승인 요청을 09시로 미룬다 (계획 #%s)", plan_id)
+        return False
+    return telegram.notify_with_buttons(conn, text, buttons)
+
+
+def _report_result(conn: sqlite3.Connection, row: sqlite3.Row, result: dict[str, Any]) -> None:
+    """수행 결과를 폰으로. **diff가 아니라 커밋 메시지를 보낸다** — 폰 화면에서
+    diff를 읽는 것은 검토가 아니다."""
+    import html
+
+    status = result.get("status")
+    if status == "requeued":
+        telegram.notify(conn, f"⏳ 사용 한도 — 계획 #{row['id']}은 다음 실행으로 미룹니다.")
+        return
+
+    if status == "done" and result.get("landed") == "main":
+        telegram.notify_with_buttons(
             conn,
-            f"⏳ 사용 한도 도달 — <i>{item['title']}</i> 는 다음 실행으로 미룹니다.",
+            f"🔧 <b>자동으로 고쳤습니다</b> — main에 반영됨\n\n"
+            f"<pre>{html.escape(_commit_message(row)[:700])}</pre>\n"
+            f"커밋 <code>{result.get('commit_sha')}</code>\n\n"
+            "<i>검증 명령이 실제로 통과했습니다. 다음 사이클부터 고쳐진 코드로 돕니다.</i>",
+            [[{"text": "↩️ 되돌리기", "callback_data": f"revert:{result.get('commit_sha')}"}]],
         )
         return
-    icon = {"done": "🔧", "skipped": "➖", "failed": "❌"}.get(r["status"], "•")
-    src = "폰 지시" if item["source"] == "human" else "자체 감지"
-    lines = [f"{icon} <b>{src}</b> — {item['title']}", "", f"브랜치 <code>{r['branch']}</code>"]
-    if r.get("diff"):
-        lines += ["", f"<pre>{r['diff'][:450]}</pre>"]
-    if r["status"] == "done":
-        lines += ["", "검토 후 병합하세요. main에는 반영되지 않았습니다."]
-    telegram.notify(conn, "\n".join(lines))
+
+    icon = {"done": "🌿", "demoted": "🟡", "skipped": "➖", "failed": "❌"}.get(status, "•")
+    head = {
+        "done": "브랜치에 두었습니다 — 사람이 병합하세요",
+        "demoted": "자동반영을 내렸습니다 — 확인이 필요합니다",
+        "skipped": "바뀐 것이 없습니다",
+        "failed": "수행 실패",
+    }.get(status, status)
+    telegram.notify(
+        conn,
+        f"{icon} <b>계획 #{row['id']}</b> — {head}\n"
+        f"<i>{html.escape(row['title'])}</i>\n\n"
+        + (f"브랜치 <code>{result.get('branch')}</code>\n" if result.get("branch") else "")
+        + (f"사유: {html.escape(str(result.get('reason'))[:300])}\n" if result.get("reason") else "")
+        + "\n<i>고장은 큐에 그대로 남아 있습니다 — main에 반영돼야 해결로 칩니다.</i>",
+    )
+
+
+def revert(conn: sqlite3.Connection, sha: str) -> dict[str, Any]:
+    """자동반영된 커밋을 되돌린다. 되돌림도 커밋이라 이력이 남는다.
+
+    reset이 아니라 revert인 이유: 무엇을 되돌렸는지 나중에 읽을 수 있어야 하고,
+    reset은 그 사이에 들어온 다른 커밋까지 날린다.
+    """
+    if not re.fullmatch(r"[0-9a-f]{6,40}", sha or ""):
+        return {"ok": False, "reason": "커밋 해시 형식이 아니다"}
+    if _git("status", "--porcelain"):
+        return {"ok": False, "reason": "작업 트리에 커밋 안 된 변경이 있다"}
+    try:
+        _git("revert", "--no-edit", sha)
+    except RuntimeError as e:
+        _git("revert", "--abort", check=False)
+        return {"ok": False, "reason": str(e)[:300]}
+    new_sha = _git("rev-parse", "--short", "HEAD")
+    conn.execute("UPDATE fix_plans SET status='reverted' WHERE commit_sha=?", (sha,))
+    conn.commit()
+    return {"ok": True, "reverted": sha, "commit": new_sha}
+
+
+def recent_auto_commits(conn: sqlite3.Connection, limit: int = 8) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT id, title, risk, commit_sha, status, finished_at FROM fix_plans
+           WHERE commit_sha IS NOT NULL ORDER BY id DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]

@@ -25,6 +25,22 @@ llm:
   thinking_tokens: 0           # Sonnet 4.6에만 적용. 0이면 확장 사고 끔
   timeout_sec: 900
 
+# 자가복구 에이전트 둘. 이력서를 쓰는 llm과 다른 일이라 따로 설정한다 —
+# 이쪽은 코드를 읽고 고치므로 더 좋은 모델을 쓴다.
+#
+# 둘을 갈라 둔 이유: 나중에 한쪽만 내리고 싶어진다. 계획은 비싸도 정확해야
+# 하고(위험도를 잘못 매기면 승인 없이 반영된다), 계획이 정확하면 수행은 더
+# 싼 모델로도 된다.
+orchestrator:
+  planner:                     # 읽기 전용. 원인을 찾고 위험도를 매긴다
+    model: claude-opus-5
+    effort: high               # low | medium | high | xhigh | max
+    timeout_sec: 1800
+  fixer:                       # 승인(또는 low 판정)된 계획을 실제로 고친다
+    model: claude-opus-5
+    effort: high
+    timeout_sec: 3600
+
 scrape:
   # 실제로 수집할 플랫폼. 어댑터가 있다고 전부 켜지 않습니다.
   #
