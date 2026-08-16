@@ -181,6 +181,84 @@ def ask(
     return proc.stdout.strip()
 
 
+def ask_session(
+    prompt: str,
+    *,
+    session_id: str | None = None,
+    model: str | None = None,
+    timeout: int | None = None,
+    system_prompt: str = WRITER_SYSTEM_PROMPT,
+) -> dict[str, str]:
+    """세션을 이어가며 묻는다. 반복 편집(가이드 수정)처럼 이전 지시를 기억해야
+    자연스러운 경우에 쓴다 — 그 외에는 매번 완전히 새 대화인 `ask()`를 쓴다.
+
+    `ask()`는 `--no-session-persistence`로 매 호출을 무상태로 만든다. 이
+    함수는 반대로 세션을 남긴다: `session_id`가 있으면 `--resume`으로 이어가고,
+    없으면 새 세션을 시작한다(claude 기본값이 알아서 만들고 저장한다).
+
+    반환: {"text": 응답 본문, "session_id": 다음 호출에 넘길 id}.
+    """
+    if not cli_available():
+        raise ClaudeUnavailable(
+            "claude CLI를 찾을 수 없습니다. Claude Code가 설치되어 있고 PATH에 있는지 확인하세요."
+        )
+
+    cfg = effective_config().get("llm", {})
+    model = model or cfg.get("model", "claude-sonnet-5")
+    timeout = timeout or cfg.get("timeout_sec", 900)
+
+    cmd = [
+        "claude", "-p", prompt,
+        "--output-format", "json",
+        "--model", model,
+        "--system-prompt", system_prompt,
+        "--strict-mcp-config",
+        "--mcp-config", '{"mcpServers":{}}',
+        "--setting-sources", "",
+        "--allowed-tools", "",
+    ]
+    if session_id:
+        cmd += ["--resume", session_id]
+
+    log.info(
+        "claude 호출(세션 %s) — 프롬프트 %d자",
+        session_id[:8] if session_id else "새로",
+        len(prompt),
+    )
+
+    try:
+        proc = subprocess.run(
+            cmd, cwd=INSTANCE_ROOT, capture_output=True, text=True, timeout=timeout,
+            check=False, env=_child_env(0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"claude 호출이 {timeout}초 안에 끝나지 않았습니다. "
+            "config.yaml의 llm.timeout_sec를 늘리거나 더 빠른 모델을 쓰세요."
+        ) from exc
+
+    if proc.returncode != 0:
+        combined = (proc.stdout or "") + (proc.stderr or "")
+        _raise_if_limited(combined)
+        raise RuntimeError(
+            f"claude 실행 실패 (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}"
+        )
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"text": proc.stdout.strip(), "session_id": session_id or ""}
+
+    if payload.get("is_error"):
+        _raise_if_limited(str(payload.get("result", "")))
+        raise RuntimeError(f"claude 오류: {str(payload.get('result'))[:500]}")
+    _log_cost(payload)
+    return {
+        "text": str(payload.get("result", "")).strip(),
+        "session_id": str(payload.get("session_id") or session_id or ""),
+    }
+
+
 def _log_cost(payload: dict) -> None:
     """호출 비용이 눈에 보여야 모델 선택을 판단할 수 있다."""
     usage = payload.get("usage") or {}

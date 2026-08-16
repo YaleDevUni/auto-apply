@@ -52,8 +52,9 @@ HELP = (
     "/resume  재개\n"
     "/queue   개발 지시 큐\n\n"
     "<b>작성 가이드 (Opus 5가 편집)</b>\n"
-    "/guide 지시문        가이드를 지시대로 고친다\n"
-    "/guide 되돌리기      마지막 백업으로 되돌린다\n\n"
+    "/guide 지시문        가이드를 지시대로 고친다 (직전 대화를 이어받음)\n"
+    "/guide 되돌리기      마지막 백업으로 되돌린다\n"
+    "/guide 세션클리어    이어가던 대화를 끊는다\n\n"
     "<b>수정 요청 원장 (직접 편집, LLM 없음)</b>\n"
     "/revlog              목록\n"
     "/revlog edit N 내용  N번을 고친다\n"
@@ -174,11 +175,15 @@ def _cmd_guide(conn: sqlite3.Connection, rest: str) -> str:
     if not rest:
         return (
             "사용법: <code>/guide 지시문</code>\n"
-            "되돌리기: <code>/guide 되돌리기</code>\n\n"
-            "예: <i>/guide 영업 공고엔 인프라 경험을 빼라는 규칙을 §7-1에 추가</i>"
+            "되돌리기: <code>/guide 되돌리기</code>\n"
+            "대화 끊기: <code>/guide 세션클리어</code>\n\n"
+            "예: <i>/guide 영업 공고엔 인프라 경험을 빼라는 규칙을 §7-1에 추가</i>\n\n"
+            "<i>지시는 직전 대화를 이어받습니다(\"그거 말고 그 앞부분도\" 가능). "
+            "화제가 바뀌면 세션클리어로 끊으세요.</i>"
         )
 
     revert = rest in ("되돌리기", "revert", "복구")
+    clear_session = rest in ("세션클리어", "세션 클리어", "초기화", "새로시작", "clear")
 
     # Opus 5 호출은 수 분 걸릴 수 있어 별도 프로세스로 돌린다 — 수신 루프가
     # 막히면 그동안 온 다른 메시지(버튼 포함)를 못 받는다. 결과는 그 프로세스가
@@ -188,11 +193,18 @@ def _cmd_guide(conn: sqlite3.Connection, rest: str) -> str:
     from ..paths import CODE_ROOT
 
     argv = [str(CODE_ROOT / ".venv/bin/python"), "cli.py", "guide"]
-    argv += (["되돌리기", "--revert"] if revert else [rest])
+    if clear_session:
+        argv += ["-", "--clear-session"]  # instruction은 안 쓰이지만 위치인자라 채워야 한다
+    elif revert:
+        argv += ["되돌리기", "--revert"]
+    else:
+        argv += [rest]
     subprocess.Popen(
         argv, cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
     )
 
+    if clear_session:
+        return "🧹 가이드 대화를 끊습니다…"
     if revert:
         return "↩️ 가이드를 마지막 백업으로 되돌립니다…"
     return (

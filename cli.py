@@ -70,6 +70,9 @@ def main() -> int:
     gp = sub.add_parser("guide", help="작성 가이드를 지시대로 고친다 (Opus 5, 백업 남김)")
     gp.add_argument("instruction", help="예: 영업 공고엔 인프라 경험을 빼라는 규칙을 §7-1에 추가")
     gp.add_argument("--revert", action="store_true", help="마지막 백업으로 되돌린다")
+    gp.add_argument(
+        "--clear-session", action="store_true",
+        help="이어가던 대화를 끊는다. 다음 지시는 새 대화로 시작한다")
 
     lgp = sub.add_parser("revlog", help="수정 요청 원장 보기 / 고치기")
     lgp.add_argument("--edit", type=int, metavar="N", help="N번 항목을 고친다")
@@ -197,7 +200,7 @@ def main() -> int:
     elif args.cmd == "revise":
         _out(_revise(args.job_id, args.feedback))
     elif args.cmd == "guide":
-        _out(_guide(args.instruction, revert=args.revert))
+        _out(_guide(args.instruction, revert=args.revert, clear_session=args.clear_session))
     elif args.cmd == "revlog":
         _out(_revlog(edit=args.edit, delete=args.delete, text=args.text))
     elif args.cmd == "builds":
@@ -731,8 +734,8 @@ def _revise(job_id: int, feedback: str) -> dict:
     return {"revised": job_id, "resume": result.get("resume")}
 
 
-def _guide(instruction: str, *, revert: bool) -> dict:
-    """작성 가이드를 고치거나 마지막 백업으로 되돌린다.
+def _guide(instruction: str, *, revert: bool, clear_session: bool = False) -> dict:
+    """작성 가이드를 고치거나, 마지막 백업으로 되돌리거나, 이어가던 대화를 끊는다.
 
     텔레그램 수신 루프가 서브프로세스로 이 커맨드를 부른다 — Opus 5 호출은
     수 분 걸릴 수 있어 수신을 막으면 안 되기 때문이다. 그래서 결과는
@@ -740,12 +743,21 @@ def _guide(instruction: str, *, revert: bool) -> dict:
     """
     from src.autoapply import guide
 
+    if clear_session:
+        result = guide.clear_session()
+        _tell(_guide_message(result, revert=False, clear_session=True))
+        return result
+
     result = guide.revert() if revert else guide.edit(instruction)
-    _tell(_guide_message(result, revert=revert))
+    _tell(_guide_message(result, revert=revert, clear_session=False))
     return result
 
 
-def _guide_message(result: dict, *, revert: bool) -> str:
+def _guide_message(result: dict, *, revert: bool, clear_session: bool = False) -> str:
+    if clear_session:
+        return ("🧹 가이드 대화를 끊었습니다. 다음 지시는 새 대화로 시작합니다."
+                if result.get("cleared") else "가이드 대화가 이미 비어 있습니다.")
+
     if revert:
         if result.get("ok"):
             return f"↩️ 가이드를 되돌렸습니다 — {html.escape(result['restored'])}"

@@ -20,6 +20,19 @@
 그 판단을 자동으로 하면 한 공고의 특수한 요구가 규칙이 된다. 규칙이 된 순간
 이후 모든 이력서에 적용되고, 잘못된 규칙일수록 티가 안 난다. 그래서 승격은
 사람이 폰에서 시작한다.
+
+## 왜 세션을 이어가나
+
+처음엔 호출마다 완전히 새 대화였다(`llm.ask()`, `--no-session-persistence`).
+실제로 써보니 "그거 말고 그 앞부분도" 같은 이어지는 지시를 매번 못 알아듣고
+지시 하나하나가 완결된 문장이어야 했다 — 대화가 아니라 매번 처음 보는
+사람에게 다시 설명하는 느낌이었다.
+
+그래서 가이드 편집만 `llm.ask_session()`으로 세션을 이어간다. session_id를
+`settings` 표에 저장해뒀다가 다음 호출에 `--resume`으로 넘긴다. 화제가
+바뀌면(다른 섹션 얘기로 넘어가거나 오래 지나서) 낡은 맥락이 새 지시 해석에
+계속 끼어들 수 있으니, 그럴 땐 사람이 `clear_session()`으로 끊는다 — 자동
+만료를 두지 않은 이유는 "얼마나 지나면 무관해지는가"를 정할 근거가 없어서다.
 """
 
 from __future__ import annotations
@@ -33,7 +46,7 @@ from typing import Any
 from . import llm
 from .assemble import load_revision_log
 from .config import effective_config
-from .db import now
+from .db import connect, get_setting, now, set_setting
 from .paths import PROFILE_DIR, RESUME_SRC_DIR
 
 log = logging.getLogger(__name__)
@@ -43,6 +56,8 @@ GUIDE_PATH = RESUME_SRC_DIR / "resume-guide.md"
 # 백업은 RESUME_SRC_DIR **밖**에 둔다. 안에 두면 load_guide()의 rglob("*.md")가
 # 백업까지 사실 저장소로 합쳐서, 옛 규칙과 새 규칙이 동시에 프롬프트에 들어간다.
 BACKUP_DIR = PROFILE_DIR / "guide-backups"
+
+SESSION_KEY = "guide_session_id"
 
 _HEADING = re.compile(r"^#{1,4} .+$", re.MULTILINE)
 
@@ -92,6 +107,33 @@ def _apply(text: str, edits: list[dict[str, str]]) -> tuple[str, list[str]]:
     return out, applied
 
 
+def _session_id() -> str:
+    conn = connect()
+    try:
+        return get_setting(conn, SESSION_KEY, "")
+    finally:
+        conn.close()
+
+
+def _remember_session(session_id: str) -> None:
+    conn = connect()
+    try:
+        set_setting(conn, SESSION_KEY, session_id)
+    finally:
+        conn.close()
+
+
+def clear_session() -> dict[str, Any]:
+    """가이드 수정 세션을 끊는다. 다음 지시는 새 대화로 시작한다.
+
+    자동 만료가 없으므로 화제가 바뀌었을 때 사람이 직접 부른다 — 안 끊으면
+    낡은 맥락("아까 그거")이 다음 지시 해석에 계속 끼어든다.
+    """
+    had = bool(_session_id())
+    _remember_session("")
+    return {"ok": True, "cleared": had}
+
+
 def _diff(before: str, after: str, limit: int = 1800) -> str:
     lines = list(difflib.unified_diff(
         before.splitlines(), after.splitlines(),
@@ -107,11 +149,26 @@ def edit(instruction: str) -> dict[str, Any]:
 
     before = GUIDE_PATH.read_text(encoding="utf-8")
     cfg = effective_config().get("llm", {})
+    model = cfg.get("guide_model", "claude-opus-5")
 
     # 원장을 함께 준다. "이 지적이 세 번 나왔으니 규칙으로 올려줘" 같은 지시는
     # 원장을 봐야 무슨 지적이었는지 알 수 있다.
     prompt = PROMPT.format(instruction=instruction, guide=before) + load_revision_log()
-    raw = llm.ask(prompt, model=cfg.get("guide_model", "claude-opus-5"))
+
+    session_id = _session_id()
+    try:
+        resp = llm.ask_session(prompt, session_id=session_id or None, model=model)
+    except RuntimeError:
+        # 저장해둔 session_id가 낡았을 수 있다(로컬 세션 기록이 정리됐거나
+        # 다른 이유로 --resume이 실패). 한 번은 새 세션으로 다시 시도한다 —
+        # 여기서 그냥 실패시키면 세션이 한 번 꼬인 뒤로 /guide 자체가 계속 죽는다.
+        if not session_id:
+            raise
+        log.warning("가이드 세션(%s…) 재개 실패 — 새 세션으로 재시도", session_id[:8])
+        _remember_session("")
+        resp = llm.ask_session(prompt, session_id=None, model=model)
+    _remember_session(resp["session_id"])
+    raw = resp["text"]
 
     try:
         data = json.loads(re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE))
@@ -158,4 +215,7 @@ def revert(backup_name: str = "") -> dict[str, Any]:
         return {"ok": False, "reason": "백업이 없다"}
     pick = next((b for b in backups if b.name == backup_name), backups[-1])
     GUIDE_PATH.write_text(pick.read_text(encoding="utf-8"), encoding="utf-8")
+    # 파일이 대화가 모르는 상태로 바뀌었다. 세션이 살아 있으면 모델이 이미
+    # 지워진 내용을 계속 참조하게 된다 — 되돌린 시점에 대화도 같이 끊는다.
+    _remember_session("")
     return {"ok": True, "restored": pick.name}
