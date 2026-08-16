@@ -114,16 +114,13 @@ def login(*, headless: bool = False, url: str = "https://id.wanted.co.kr/") -> d
     # 상주 창이 프로필을 잡고 있으면 두 번째 Chrome은 아예 못 뜬다(프로필 잠금).
     # 그럴 땐 그 창에 붙어서 로그인 페이지로 보낸다 — 사람은 숨겨둔 창을
     # 다시 꺼내(Dock의 Chrome 클릭) 로그인하면 된다.
-    import httpx
+    # 포트가 열려 있는지가 아니라 **우리 프로필의 창**이 떠 있는지를 본다.
+    # 남의 크롬이 9222를 잡고 있는 경우까지 상주로 치면, 사람 브라우저에
+    # 로그인 페이지를 열어놓고 "여기서 로그인하세요"라고 안내하게 된다 —
+    # 그 세션은 우리 프로필에 저장되지 않는다.
+    from .session import resident_owner
 
-    from .session import CDP_URL
-
-    resident = False
-    try:
-        httpx.get(f"{CDP_URL}/json/version", timeout=2)
-        resident = True
-    except Exception:  # noqa: BLE001
-        pass
+    resident = resident_owner()[0] == "ours"
 
     s = PlaywrightSession(headless=headless, hidden=resident)
     s.start()

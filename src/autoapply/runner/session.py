@@ -95,8 +95,18 @@ def _consume_restart_flag() -> str | None:
     return reason
 
 
-def _kill_resident() -> None:
-    """CDP_PORT에 붙은 상주 브라우저 프로세스를 찾아 종료한다."""
+# 우리 탭의 CDP targetId. 상주 창에 붙을 때 **이 탭만** 쓴다.
+#
+# 왜 필요한가(2026-08-16 실측 사고): 예전 _attach()는 `ctx.pages[0]`을 잡았다.
+# 그건 "우리 탭"이 아니라 "브라우저의 첫 번째 탭"이다. 사람이 그 창에 탭을
+# 하나 열면(클로드 재로그인 OAuth 창이 그랬다) 자동화가 그 탭을 그대로 몰고
+# 다닌다 — 사람이 로그인하던 화면이 원티드로 넘어가고, 무엇보다 남의 세션
+# 위에서 우리 작업이 돈다.
+_TAB_FILE = BROWSER_DIR.parent / ".browser_tab"
+
+
+def _resident_pids() -> list[int]:
+    """CDP_PORT를 LISTEN 중인 프로세스 pid 목록."""
     import subprocess
 
     try:
@@ -105,12 +115,69 @@ def _kill_resident() -> None:
             capture_output=True, text=True, timeout=5,
         ).stdout
     except Exception:  # noqa: BLE001
-        return
-    for pid in out.split():
+        return []
+    pids = []
+    for tok in out.split():
         try:
-            subprocess.run(["kill", pid.strip()], timeout=5, check=False)
-        except Exception:  # noqa: BLE001
-            pass
+            pids.append(int(tok.strip()))
+        except ValueError:
+            continue
+    return pids
+
+
+def _cmdline(pid: int) -> str:
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def resident_owner() -> tuple[str, int, str]:
+    """CDP 포트를 누가 잡고 있나. ("ours"|"foreign"|"none", pid, 명령줄)
+
+    **이 확인 없이 붙으면 남의 브라우저를 몬다.** 포트 번호는 신원이 아니다 —
+    9222는 흔한 기본값이라 다른 자동화 도구·확장·수동으로 띄운 크롬이 얼마든
+    같은 포트를 잡을 수 있고, 실제로 그렇게 사람의 크롬 창에서 우리 작업이
+    돌았다.
+
+    신원의 근거는 **프로필 경로**다. Playwright가 `--user-data-dir=<BROWSER_DIR>`
+    로 띄우므로 그 문자열이 명령줄에 있으면 우리가 띄운 창이다. 로그인 세션이
+    사는 곳이 곧 그 프로필이라, 프로필이 같다는 건 "우리 세션이 있는 창"과
+    같은 말이기도 하다.
+    """
+    want = str(BROWSER_DIR)
+    for pid in _resident_pids():
+        cmd = _cmdline(pid)
+        if f"--user-data-dir={want}" in cmd or f'--user-data-dir="{want}"' in cmd:
+            return "ours", pid, cmd
+        return "foreign", pid, cmd
+    return "none", 0, ""
+
+
+def _kill_resident() -> None:
+    """상주 브라우저를 종료한다. **우리가 띄운 것만.**
+
+    예전에는 포트를 잡고 있는 pid를 그대로 죽였다. 그 포트에 사람의 크롬이
+    붙어 있으면 사람 브라우저를 죽이는 코드가 된다.
+    """
+    import subprocess
+
+    who, pid, cmd = resident_owner()
+    if who != "ours":
+        if who == "foreign":
+            log.warning("CDP %d를 우리 것이 아닌 프로세스가 잡고 있다(pid %d) — 죽이지 않는다: %s",
+                        CDP_PORT, pid, cmd[:120])
+        return
+    try:
+        subprocess.run(["kill", str(pid)], timeout=5, check=False)
+    except Exception:  # noqa: BLE001
+        pass
+    _TAB_FILE.unlink(missing_ok=True)
 
 
 def _spawn_resident(*, wait_sec: int = 20) -> bool:
@@ -122,8 +189,6 @@ def _spawn_resident(*, wait_sec: int = 20) -> bool:
     """
     import subprocess
     import time as _t
-
-    import httpx
 
     from ..paths import CODE_ROOT
 
@@ -137,13 +202,14 @@ def _spawn_resident(*, wait_sec: int = 20) -> bool:
          "while True: time.sleep(3600)"],
         cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
     )
+    # "포트가 응답한다"가 아니라 "**우리 프로필**의 크롬이 그 포트를 잡았다"를
+    # 기다린다. 남의 크롬이 이미 9222를 잡고 있으면 우리 크롬은 그 포트에
+    # 바인딩하지 못하는데, 응답만 보면 그걸 성공으로 읽는다.
     for _ in range(wait_sec):
         _t.sleep(1)
-        try:
-            httpx.get(f"{CDP_URL}/json/version", timeout=2)
+        if resident_owner()[0] == "ours":
             return True
-        except Exception:  # noqa: BLE001
-            continue
+    log.warning("상주 브라우저가 %d초 안에 CDP %d를 잡지 못했다", wait_sec, CDP_PORT)
     return False
 
 
@@ -183,6 +249,64 @@ def _cleanup_stale_service_workers() -> int:
         except Exception:  # noqa: BLE001
             pass
     return closed
+
+
+def _target_id(page: Any) -> str:
+    """페이지의 CDP targetId. 탭의 신원이다 — 제목·URL과 달리 안 바뀐다."""
+    try:
+        cdp = page.context.new_cdp_session(page)
+        info = cdp.send("Target.getTargetInfo") or {}
+        return str((info.get("targetInfo") or {}).get("targetId") or "")
+    except Exception as e:  # noqa: BLE001
+        log.debug("targetId를 읽지 못했다: %s", e)
+        return ""
+
+
+def _remember_tab(target_id: str) -> None:
+    if not target_id:
+        return
+    try:
+        _TAB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TAB_FILE.write_text(target_id, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.debug("탭 기록 실패(무시): %s", e)
+
+
+def _remembered_tab() -> str:
+    try:
+        return _TAB_FILE.read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _alert_foreign_cdp(pid: int, cmd: str) -> None:
+    """남의 크롬이 우리 포트를 잡고 있다. 로그와 폰에 남긴다.
+
+    조용히 넘기면 안 되는 이유: 이 상태에서는 상주 창을 못 쓰므로 실행마다
+    새 창이 뜬다(예전의 창 누수로 되돌아간다). 사람이 그 크롬을 닫거나
+    포트를 비워줘야 원래 동작으로 돌아온다.
+    """
+    log.warning(
+        "CDP %d를 우리 것이 아닌 브라우저가 잡고 있다(pid %d) — 붙지 않는다. %s",
+        CDP_PORT, pid, cmd[:160],
+    )
+    try:
+        from ..db import connect
+        from ..notify.telegram import notify
+
+        conn = connect()
+        try:
+            notify(
+                conn,
+                f"⚠️ 다른 브라우저가 디버깅 포트 {CDP_PORT}를 잡고 있습니다(pid {pid}).\n"
+                "그 창에는 붙지 않습니다 — 대신 실행마다 새 창이 뜹니다.\n"
+                "<i>해당 크롬을 닫은 뒤 <code>cli.py browser-open</code> 으로 상주 창을 "
+                "다시 띄우세요.</i>",
+            )
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        log.debug("외부 CDP 경고 전송 실패(무시): %s", e)
 
 
 def _hidden_default() -> bool:
@@ -237,9 +361,16 @@ class PlaywrightSession:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
 
-        # 이미 떠 있는 창이 있으면 거기 붙는다. 새로 띄우지 않는다.
-        if self._hidden and self._attach():
+        # 붙기 전에 **누구 창인지** 먼저 본다. 포트가 열려 있다는 것만으로
+        # 붙으면 사람의 크롬을 몰게 된다(resident_owner 참고).
+        who, pid, cmd = resident_owner()
+        if who == "foreign":
+            _alert_foreign_cdp(pid, cmd)
+
+        # 이미 떠 있는 **우리** 창이 있으면 거기 붙는다. 새로 띄우지 않는다.
+        if self._hidden and who == "ours" and self._attach():
             return
+
         opts: dict[str, Any] = dict(
             headless=self._headless,
             viewport={"width": 1440, "height": 900},
@@ -274,6 +405,9 @@ class PlaywrightSession:
         )
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._page.set_default_timeout(15000)
+        # 이 창이 다음 실행의 상주 창이 된다. 그때 어느 탭이 우리 것인지
+        # 알 수 있도록 지금 적어둔다.
+        _remember_tab(_target_id(self._page))
 
     def _attach(self) -> bool:
         """떠 있는 Chrome에 붙는다. 없으면 False."""
@@ -292,9 +426,10 @@ class PlaywrightSession:
                 )
             except Exception:  # noqa: BLE001
                 pass
-            # 탭을 새로 열지 않고 있는 것을 재사용한다. 탭이 늘면 사람이 그 창을
-            # 다시 열었을 때 지저분하고, 새 탭은 앱을 앞으로 끌어낼 수 있다.
-            self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+            # **우리 탭만** 쓴다. pages[0]은 우리 탭이라는 보장이 없다 —
+            # 사람이 그 창에 탭을 하나 열면 그게 0번이 될 수 있고, 그러면
+            # 사람이 보던 화면 위에서 자동화가 돈다(_TAB_FILE 주석 참고).
+            self._page = self._own_page()
             self._page.set_default_timeout(15000)
             self._attached = browser_
             log.info("떠 있는 브라우저에 연결 (창을 새로 띄우지 않음)")
@@ -313,6 +448,28 @@ class PlaywrightSession:
             log.info("연결 실패 — 새로 띄운다: %s", e)
             self._ctx = self._page = None
             return False
+
+    def _own_page(self) -> Any:
+        """상주 창에서 **우리 탭**을 찾는다. 없으면 새로 열고 기록한다.
+
+        기록해둔 targetId와 대조한다. URL이나 제목으로 고르면 안 된다 — 사람이
+        같은 사이트를 열어둘 수 있고(원티드 공고를 직접 보는 일이 잦다), 그러면
+        그 탭을 뺏는다.
+
+        탭을 새로 여는 비용(앱이 앞으로 끌려나올 수 있다)은 상주 창 수명에
+        한 번뿐이다. 남의 탭을 모는 사고와 바꿀 만한 값이 아니다.
+        """
+        want = _remembered_tab()
+        if want:
+            for pg in self._ctx.pages:
+                if _target_id(pg) == want:
+                    log.info("우리 탭에 연결 (targetId %s…)", want[:8])
+                    return pg
+            log.info("기록해둔 탭이 없다(사람이 닫았을 수 있다) — 새 탭을 연다")
+
+        page = self._ctx.new_page()
+        _remember_tab(_target_id(page))
+        return page
 
     def close(self) -> None:
         # 붙어서 쓴 창은 **닫지 않는다.** 닫으면 다음 실행이 다시 띄우게 되고,

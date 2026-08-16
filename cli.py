@@ -640,15 +640,19 @@ def _browser_open() -> dict:
     headless로는 못 한다 — 원티드가 CloudFront 단에서 403을 준다(실측).
     창을 화면 밖으로 보내는 것도 macOS가 되돌린다. 남은 답이 이것이다.
     """
-    from src.autoapply.runner.session import CDP_URL, _spawn_resident
+    from src.autoapply.runner.session import CDP_URL, _spawn_resident, resident_owner
 
-    import httpx
-
-    try:
-        httpx.get(f"{CDP_URL}/json/version", timeout=2)
+    who, pid, cmd = resident_owner()
+    if who == "ours":
         return {"이미 떠 있음": CDP_URL, "할 일": "없음 — 그대로 쓰면 된다"}
-    except Exception:  # noqa: BLE001
-        pass
+    if who == "foreign":
+        # 우리 것이 아닌 크롬이 포트를 잡고 있으면 붙지도, 죽이지도 않는다.
+        # 사람이 쓰는 창일 수 있다 — 실제로 그 창에서 우리 작업이 돌아 사고가 났다.
+        return {
+            "막힘": f"CDP {CDP_URL}를 다른 브라우저가 잡고 있다 (pid {pid})",
+            "명령줄": cmd[:200],
+            "할 일": "그 크롬을 닫고 다시 실행하세요. 닫기 전까지는 실행마다 새 창이 뜹니다.",
+        }
 
     if _spawn_resident():
         return {"띄웠다": CDP_URL,
