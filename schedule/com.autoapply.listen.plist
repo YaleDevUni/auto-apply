@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  텔레그램 상시 대기 (launchd)
+
+  사이클(2시간마다)에서만 받아오면 답장이 최대 2시간 밀린다. 실제로 그랬다.
+  이 에이전트는 롱폴링으로 항상 붙어 있어 폰에서 보낸 명령에 즉시 답한다.
+
+  유휴 비용이 거의 없다 — 연결 하나를 열어두고 서버가 새 메시지를 밀어줄 때까지
+  기다리는 방식이라, 폴링 간격을 줄이는 것과 다르다.
+
+  KeepAlive: 죽으면 다시 띄운다. 맥이 잠들거나 네트워크가 끊기는 일이 잦다.
+  ThrottleInterval: 재시작 폭주를 막는다.
+
+  설치: schedule/install.sh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.autoapply.listen</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/.venv/bin/python</string>
+        <string>__REPO__/cli.py</string>
+        <string>listen</string>
+        <string>--watch</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/logs/listen.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/logs/listen.err.log</string>
+</dict>
+</plist>

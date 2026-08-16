@@ -232,7 +232,11 @@ CREATE TABLE IF NOT EXISTS resume_builds (
     ok            INTEGER NOT NULL DEFAULT 0,
     required_gaps INTEGER NOT NULL DEFAULT 0,
     gaps          TEXT NOT NULL DEFAULT '[]',
-    resume_title  TEXT,
+    resume_title  TEXT,                      -- 플랫폼에 등록된 이력서 제목
+    resume_url    TEXT,                      -- 그 이력서의 편집 URL
+    track         TEXT,                      -- 어느 트랙에 맞춰 썼는지
+    headline      TEXT,                      -- 한 줄 타이틀 (적합도 비교용)
+    skills        TEXT NOT NULL DEFAULT '[]',-- 실제로 등록된 스킬
     built_at      TEXT NOT NULL
 );
 
@@ -309,12 +313,41 @@ def now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+# 스키마에 나중에 붙인 컬럼들. CREATE TABLE IF NOT EXISTS는 이미 있는 테이블에
+# 컬럼을 더해주지 않으므로, 없는 것만 골라 ALTER 한다.
+#
+# 마이그레이션 도구를 두지 않는 이유: 이 DB는 언제든 지우고 다시 수집하면 되는
+# 캐시에 가깝다. 유일하게 못 지우는 건 apply_ledger(중복지원 방어)인데 그건
+# 스키마가 안 바뀐다. 도구를 들이는 비용이 얻는 것보다 크다.
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "resume_builds": {
+        "resume_title": "TEXT",
+        "resume_url": "TEXT",
+        "track": "TEXT",
+        "headline": "TEXT",
+        "skills": "TEXT NOT NULL DEFAULT '[]'",
+    },
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in MIGRATIONS.items():
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not have:
+            continue  # 테이블 자체가 없으면 SCHEMA가 만들어준다
+        for name, decl in columns.items():
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    conn.commit()
+
+
 def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 

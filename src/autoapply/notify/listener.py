@@ -56,13 +56,23 @@ def is_paused(conn: sqlite3.Connection) -> bool:
     return get_setting(conn, PAUSE_KEY, "0") == "1"
 
 
-def _fetch(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _fetch(conn: sqlite3.Connection, wait: int = 0) -> list[dict[str, Any]]:
+    """수신. wait>0이면 롱폴링 — 새 메시지가 올 때까지 서버가 붙잡고 있는다.
+
+    wait=0은 사이클에서 한 번 훑고 끝낼 때 쓴다. 그 방식만 쓰면 응답이 다음
+    사이클(2시간)까지 밀린다 — 실제로 그래서 답장이 한참 뒤에 갔다.
+    """
     token, _ = _creds(conn)
     offset = get_setting(conn, OFFSET_KEY, "")
-    params: dict[str, Any] = {"timeout": 0, "allowed_updates": '["message"]'}
+    params: dict[str, Any] = {
+        "timeout": wait,
+        "allowed_updates": '["message","callback_query"]',
+    }
     if offset:
         params["offset"] = int(offset) + 1
-    r = httpx.get(API.format(token=token, method="getUpdates"), params=params, timeout=30)
+    r = httpx.get(
+        API.format(token=token, method="getUpdates"), params=params, timeout=wait + 20
+    )
     r.raise_for_status()
     return r.json().get("result", [])
 
@@ -173,10 +183,33 @@ def _handle(conn: sqlite3.Connection, text: str) -> str:
     )
 
 
-def drain(conn: sqlite3.Connection, *, reply: bool = True) -> dict[str, Any]:
-    """쌓인 메시지를 한 번에 처리한다. launchd 사이클마다 부른다."""
+def watch(conn: sqlite3.Connection, *, wait: int = 25) -> None:
+    """상시 대기하며 즉시 응답한다. 별도 launchd 에이전트가 이걸 돌린다.
+
+    롱폴링이라 유휴 시 비용이 거의 없다 — 연결 하나를 열어두고 서버가 새
+    메시지를 밀어줄 때까지 기다린다. 폴링 간격을 줄이는 것과 다르다.
+
+    끊겨도 죽지 않는다. 네트워크가 잠깐 나가거나 맥이 잠들었다 깨어나는 일이
+    잦으므로, 예외는 삼키고 잠시 뒤 다시 붙는다. KeepAlive가 프로세스를
+    살려주지만 그때마다 재시작하면 로그가 지저분해진다.
+    """
+    import time
+
+    log.info("텔레그램 대기 시작 (롱폴링 %d초)", wait)
+    while True:
+        try:
+            drain(conn, wait=wait)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning("수신 중 오류 — 10초 뒤 재시도: %s", e)
+            time.sleep(10)
+
+
+def drain(conn: sqlite3.Connection, *, reply: bool = True, wait: int = 0) -> dict[str, Any]:
+    """쌓인 메시지를 처리한다. wait>0이면 새 메시지를 기다린다."""
     try:
-        updates = _fetch(conn)
+        updates = _fetch(conn, wait)
     except Exception as e:  # noqa: BLE001
         log.info("텔레그램 수신 건너뜀: %s", e)
         return {"received": 0, "reason": str(e)[:120]}
@@ -186,6 +219,19 @@ def drain(conn: sqlite3.Connection, *, reply: bool = True) -> dict[str, Any]:
 
     for u in updates:
         set_setting(conn, OFFSET_KEY, str(u["update_id"]))
+
+        # 버튼 누름 — 되돌릴 수 없는 동작의 승인 게이트다.
+        cb = u.get("callback_query")
+        if cb:
+            chat_id = str(((cb.get("message") or {}).get("chat") or {}).get("id", ""))
+            if chat_id != my_chat:
+                log.warning("등록되지 않은 chat_id %s 의 버튼 무시", chat_id)
+                ignored += 1
+                continue
+            _handle_callback(conn, cb)
+            handled += 1
+            continue
+
         msg = u.get("message") or {}
         text = (msg.get("text") or "").strip()
         chat_id = str((msg.get("chat") or {}).get("id", ""))
@@ -203,3 +249,49 @@ def drain(conn: sqlite3.Connection, *, reply: bool = True) -> dict[str, Any]:
             notify(conn, answer)
 
     return {"received": len(updates), "handled": handled, "ignored": ignored}
+
+
+def _handle_callback(conn: sqlite3.Connection, cb: dict[str, Any]) -> None:
+    """승인 버튼 처리. `apply:<job_id>` 면 실제로 제출한다.
+
+    **여기가 되돌릴 수 없는 지점이다.** 그래서 버튼을 누른 사람이 등록된
+    사용자인지 위에서 먼저 확인하고, 처리 결과를 반드시 폰으로 되돌려준다 —
+    눌렀는데 아무 반응이 없으면 다시 누르게 되고, 그건 중복지원 시도가 된다.
+    """
+    data = cb.get("data") or ""
+    cb_id = cb.get("id", "")
+
+    if data.startswith("skip:"):
+        telegram.answer_callback(conn, cb_id, "넘어갑니다")
+        notify(conn, f"➖ 건너뜀 — 공고 {data.split(':', 1)[1]}")
+        return
+
+    if not data.startswith(("submit:", "apply:")):
+        telegram.answer_callback(conn, cb_id, "모르는 버튼입니다")
+        return
+
+    # submit — 준비 때 만들어둔 이력서로 제출만 한다(권장).
+    # apply  — 조립부터 다시 한다(예전 경로. 검토한 것과 달라질 수 있다).
+    verb, job_id = data.split(":", 1)
+    cmd = "submit" if verb == "submit" else "autoapply"
+    telegram.answer_callback(conn, cb_id, "제출을 시작합니다")
+    notify(conn, f"⏳ 공고 {job_id} 제출 중…")
+
+    # 제출은 브라우저를 띄우고 수 분이 걸린다. 수신 루프를 막지 않도록
+    # 별도 프로세스로 돌리고, 결과는 그 프로세스가 폰으로 알린다.
+    import subprocess
+    from ..paths import CODE_ROOT
+
+    try:
+        argv = [str(CODE_ROOT / ".venv/bin/python"), "cli.py", cmd, job_id]
+        if cmd == "autoapply":
+            argv.append("--live")
+        subprocess.Popen(
+            argv,
+            cwd=str(CODE_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("제출 실행 실패: %s", e)
+        notify(conn, f"❌ 제출 실행 실패 — {type(e).__name__}")

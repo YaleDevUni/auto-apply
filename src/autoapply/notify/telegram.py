@@ -22,6 +22,7 @@ v2는 완전 자동화가 목표라 그 게이트를 기본값으로 넣지 않�
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -89,7 +90,12 @@ def setup(conn: sqlite3.Connection, token: str) -> dict[str, Any]:
     }
 
 
-def send_photo(conn: sqlite3.Connection, path: str, caption: str = "") -> bool:
+def send_photo(
+    conn: sqlite3.Connection,
+    path: str,
+    caption: str = "",
+    buttons: list[list[dict[str, str]]] | None = None,
+) -> bool:
     """스크린샷을 보낸다. 이게 '검토' 단계의 실물이다.
 
     셀렉터나 로그를 보내는 건 의미가 없다 — 사람은 `button.css-1x2y3z`가 맞는
@@ -104,10 +110,14 @@ def send_photo(conn: sqlite3.Connection, path: str, caption: str = "") -> bool:
         return False
     try:
         token, chat = _creds(conn)
+        data = {"chat_id": chat, "caption": caption[:1024], "parse_mode": "HTML"}
+        if buttons:
+            # 되돌릴 수 없는 동작 앞의 게이트다. 사람이 사진을 보고 누른다.
+            data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
         with p.open("rb") as fh:
             r = httpx.post(
                 API.format(token=token, method="sendPhoto"),
-                data={"chat_id": chat, "caption": caption[:1024], "parse_mode": "HTML"},
+                data=data,
                 files={"photo": (p.name, fh, "image/png")},
                 timeout=60,
             )
@@ -139,3 +149,16 @@ def notify(conn: sqlite3.Connection, text: str) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("텔레그램 알림 실패(무시): %s", e)
         return False
+
+
+def answer_callback(conn: sqlite3.Connection, callback_id: str, text: str = "") -> None:
+    """버튼을 누른 뒤 폰에 뜨는 로딩 표시를 걷어낸다. 실패해도 무시한다."""
+    try:
+        token, _ = _creds(conn)
+        httpx.post(
+            API.format(token=token, method="answerCallbackQuery"),
+            json={"callback_query_id": callback_id, "text": text[:200]},
+            timeout=20,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.info("콜백 응답 실패(무시): %s", e)

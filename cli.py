@@ -70,7 +70,11 @@ def main() -> int:
     tsp.add_argument("token", help="@BotFather에게 받은 봇 토큰")
 
     sub.add_parser("notify-login", help="세션 끊김 알림 수동 트리거 (쿨다운 무시하지 않음)")
-    sub.add_parser("listen", help="폰에서 온 메시지 처리 (운영 명령 + 개발 지시 접수)")
+    lp = sub.add_parser("listen", help="폰에서 온 메시지 처리 (운영 명령 + 개발 지시 접수)")
+    lp.add_argument(
+        "--watch", action="store_true",
+        help="상시 대기하며 즉시 응답한다 (롱폴링). 없으면 한 번 훑고 끝낸다",
+    )
 
     cq = sub.add_parser("improve", help="자기개선 오케스트레이터 — 전용 브랜치에서만 작업")
     cq.add_argument("--limit", type=int, default=1)
@@ -106,6 +110,10 @@ def main() -> int:
     cyc = sub.add_parser(
         "cycle-apply", help="대기열 상위 N건을 dry-run으로 준비한다 (제출 안 함)")
     cyc.add_argument("--limit", type=int, default=1)
+
+    sbp = sub.add_parser(
+        "submit", help="이미 등록된 이력서로 제출만 한다 (조립·입력 없음)")
+    sbp.add_argument("job_id", type=int)
 
     apr = sub.add_parser("apply", help="레시피 실행. 기본은 dry-run(제출 안 함)")
     apr.add_argument("job_id", type=int)
@@ -172,8 +180,13 @@ def main() -> int:
         from src.autoapply.notify import listener
 
         conn = connect()
-        _out(listener.drain(conn))
-        conn.close()
+        try:
+            if args.watch:
+                listener.watch(conn)
+            else:
+                _out(listener.drain(conn))
+        finally:
+            conn.close()
     elif args.cmd == "improve":
         from src.autoapply import orchestrator
 
@@ -215,6 +228,8 @@ def main() -> int:
         _out(_autoapply(args.job_id, resume_url=args.resume_url, live=args.live))
     elif args.cmd == "cycle-apply":
         _out(_cycle_apply(args.limit))
+    elif args.cmd == "submit":
+        _out(_submit(args.job_id))
     elif args.cmd == "apply":
         _out(_apply(args.job_id, live=args.live, headless=args.headless))
     return 0
@@ -250,11 +265,17 @@ def _cycle_apply(limit: int) -> dict:
     out = []
     for t in targets:
         try:
+            # 무인 사이클에서는 임시 이력서를 재사용한다.
+            #
+            # 공고마다 새로 만드는 쪽이 맞지만(사람이 검토한 것과 제출물이 같아진다),
+            # 지금은 새 이력서의 '작성 완료' 처리가 실패해 지원 목록에서 고를 수
+            # 없다. 그 상태로 사이클을 돌리면 **실패할 때마다 이력서가 하나씩
+            # 쌓인다** — 실제로 14개가 됐다. 고쳐질 때까지 재사용한다.
             r = _autoapply(t["job_id"], resume_url=_preview_resume_url(), live=False)
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
-        _report_prepared(t, r)
+        _report_prepared(t, r, (r.get("resume") or {}).get("data"))
     return {"prepared": len(out), "items": out}
 
 
@@ -285,7 +306,7 @@ def _remember_preview_resume(url: str) -> None:
         conn.close()
 
 
-def _report_prepared(target: dict, result: dict) -> None:
+def _report_prepared(target: dict, result: dict, data: dict | None = None) -> None:
     """준비 결과를 폰으로 보낸다. 성공이면 **스크린샷**, 실패면 이유.
 
     실패가 로그에만 남으면 아침에 로그를 뒤져야 안다 — 실제로 06시 사이클이
@@ -305,7 +326,20 @@ def _report_prepared(target: dict, result: dict) -> None:
             telegram.notify(conn, f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{str(err)[:200]}</i>")
             return
 
+        # 폰으로 보내는 사진은 **제출될 이력서 내용**이어야 한다.
+        # 편집기 화면은 임시 이력서를 재사용해 채운 것이라 실제 제출물이 아니다
+        # (제출은 그 공고용으로 새로 만든다). 조립 결과를 직접 그려 보낸다.
         shot = apply_res.get("evidence")
+        if data:
+            try:
+                from src.autoapply.paths import EVIDENCE_DIR
+                from src.autoapply.render import preview_image
+
+                shot = str(preview_image(
+                    data, EVIDENCE_DIR / f"preview-{target['job_id']}.png"))
+            except Exception as e:  # noqa: BLE001
+                log = __import__("logging").getLogger(__name__)
+                log.warning("미리보기 이미지 생성 실패 — 화면 사진으로 대체: %s", e)
 
         # 폰으로 보내기 전에 화면을 한 번 읽는다. 사람이 사진을 보고 판단하는
         # 것과 같은 층위를 기계가 먼저 훑어, 명백한 문제는 캡션에 적어 보낸다.
@@ -319,25 +353,53 @@ def _report_prepared(target: dict, result: dict) -> None:
             # 제출 버튼이 눌릴 상태인가, 이력서가 골라졌나 — 만 묻는다.
             v = vision.verify(
                 shot,
-                "우측 지원 패널에 이력서가 하나 선택(체크)되어 있고, "
-                "'제출하기' 버튼이 회색이 아니라 활성화(파란색)되어 있어야 한다. "
-                "오류 배너나 '로그인' 화면이 보이면 안 된다.",
-                context="채용 플랫폼의 공고 상세 + 지원 패널 화면",
+                "이력서 문서: 이름·간단 소개·경력·학력·스킬이 채워져 있고, "
+                "문장이 중간에 끊기거나 빈 섹션이 없어야 한다.",
+                context="지원에 제출될 이력서 문서",
             )
             if v["ok"] is False and v["issues"]:
                 verdict = "\n⚠️ " + "\n⚠️ ".join(i.lstrip("- ")[:70] for i in v["issues"][:3])
             elif v["ok"]:
                 verdict = "\n✅ 화면 점검 이상 없음"
 
+        from src.autoapply import assemble as _asm
+
+        reg = _asm.registration(target["job_id"], conn)
+        links = []
+        if reg.get("resume_url"):
+            links.append(f'📝 <a href="{reg["resume_url"]}">이력서 보기</a>')
+        if target.get("url"):
+            links.append(f'🔗 <a href="{target["url"]}">공고 보기</a>')
+
         caption = (
             f"📄 <b>지원 준비됨</b>\n{head}{verdict}\n\n"
-            f"확인 후 제출:\n<code>python cli.py autoapply {target['job_id']} --live</code>\n\n"
-            f"<i>제출 시 이 공고용으로 이력서를 다시 채운 뒤 넣습니다.</i>"
+            + ("  ·  ".join(links) + "\n\n" if links else "")
+            + "<i>이력서는 이미 만들어져 있습니다. 승인하면 그대로 제출합니다.</i>"
         )
-        if not (shot and telegram.send_photo(conn, shot, caption)):
+        buttons = [[
+            {"text": "✅ 제출", "callback_data": f"submit:{target['job_id']}"},
+            {"text": "➖ 건너뛰기", "callback_data": f"skip:{target['job_id']}"},
+        ]]
+        if not (shot and telegram.send_photo(conn, shot, caption, buttons)):
             telegram.notify(conn, caption)
     finally:
         conn.close()
+
+
+def _submit(job_id: int) -> dict:
+    """준비 때 등록해둔 이력서로 제출만 한다.
+
+    승인 시점에 다시 조립하지 않는 이유: 사람이 검토한 것과 나가는 것이
+    달라진다. 조립은 준비 단계에서 끝났고, 여기서는 그 이력서를 고를 뿐이다.
+    """
+    from src.autoapply import assemble
+
+    reg = assemble.registration(job_id)
+    if not reg.get("resume_title"):
+        return {"stopped": "등록된 이력서가 없다 — 먼저 준비(cycle-apply)해야 한다"}
+
+    job = _job(job_id, resume_title=reg["resume_title"])
+    return _apply_with(job, live=True)
 
 
 def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
@@ -363,10 +425,18 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
 
     filled = resume_editor.fill(built["data"], resume_url=resume_url, dry_run=False)
     _remember_preview_resume(filled.get("url", ""))
-    if not filled["title"]:
-        return {"stopped": "이력서 제목을 읽지 못함 — 어느 이력서를 낼지 정할 수 없다"}
 
-    job = _job(job_id, resume_title=filled["title"])
+    # 등록 결과를 기록해두고, 지원 단계는 DB에서 읽는다. 화면에서 제목을 읽는
+    # 것은 한 번뿐이고, 그 뒤로는 편집기 상태가 바뀌어도 흔들리지 않는다.
+    title = filled.get("title") or assemble.registered_title(job_id)
+    if not title:
+        return {"stopped": "이력서 제목을 읽지 못함 — 어느 이력서를 낼지 정할 수 없다"}
+    assemble.record_registration(
+        job_id, resume_title=title,
+        resume_url=filled.get("url", ""), skills=filled.get("skills") or [],
+    )
+
+    job = _job(job_id, resume_title=title)
     result = _apply_with(job, live=live)
     return {
         "company": built["company"],
@@ -418,6 +488,25 @@ def _apply(job_id: int, *, live: bool, headless: bool) -> dict:
     return _apply_with(_job(job_id), live=live, headless=headless)
 
 
+def _notify_submitted(job: dict, result: dict) -> None:
+    """제출 결과를 폰으로 알린다. 버튼을 눌렀는데 아무 소식이 없으면
+    다시 누르게 되고, 그건 중복지원 시도가 된다."""
+    from src.autoapply.db import connect as _c
+    from src.autoapply.notify import telegram
+
+    conn = _c()
+    try:
+        text = (
+            f"✅ <b>제출 완료</b>\n{job.get('company')} — {str(job.get('title'))[:40]}\n"
+            f"<i>원장에 기록됨. 같은 자리는 다시 나가지 않습니다.</i>"
+        )
+        shot = result.get("evidence")
+        if not (shot and telegram.send_photo(conn, shot, text)):
+            telegram.notify(conn, text)
+    finally:
+        conn.close()
+
+
 def _apply_with(job: dict, *, live: bool, headless: bool = False) -> dict:
     """공고 정보가 이미 준비된 경우의 지원 실행. autoapply 체인이 이걸 쓴다."""
     from src.autoapply.runner import LoginRequired, run
@@ -440,6 +529,7 @@ def _apply_with(job: dict, *, live: bool, headless: bool = False) -> dict:
 
     if result["submitted"]:
         agent.mark_submitted(ledger, evidence_path=result["evidence"])
+        _notify_submitted(job, result)
     else:
         # 눌렀는데 완료 화면을 못 봤다. 실제로 접수됐을 수 있으므로 자리를 놓지 않는다.
         agent.mark_failed(ledger, result["error"] or "제출 확인 실패", release=False)

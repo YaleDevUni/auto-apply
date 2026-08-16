@@ -363,7 +363,10 @@ def build_editor_json(
         path = RESUME_OUT_DIR / f"{job_id}-{safe}.json"
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    _save_build(job_id, len(required) <= max_gaps, required, gaps, conn)
+    _save_build(
+        job_id, len(required) <= max_gaps, required, gaps, conn,
+        track=job.get("track"), headline=data.get("headline"),
+    )
 
     return {
         "job_id": job_id,
@@ -495,24 +498,47 @@ def _parse_json(raw: str) -> dict[str, Any]:
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1:
         raise ValueError(f"JSON을 찾지 못했다: {text[:200]}")
-    return json.loads(text[start : end + 1])
+
+    # strict=False — 문자열 안의 날것 개행을 허용한다.
+    # 이력서 본문은 여러 줄이라 모델이 \n 대신 실제 개행을 넣는 일이 잦고,
+    # 엄격 모드는 거기서 통째로 실패한다. 내용은 멀쩡한데 파싱만 못 하는 것이라
+    # 재생성(40초)을 시키느니 받아들이는 쪽이 맞다.
+    return json.loads(text[start : end + 1], strict=False)
 
 
 def _save_build(
-    job_id: int, ok: bool, required: list, gaps: list, conn: sqlite3.Connection | None
+    job_id: int,
+    ok: bool,
+    required: list,
+    gaps: list,
+    conn: sqlite3.Connection | None,
+    *,
+    track: str | None = None,
+    headline: str | None = None,
 ) -> None:
-    """조립 결과를 남긴다. 판정이 다음 실행에서 이걸 읽어 blocker로 쓴다."""
+    """조립 결과를 남긴다.
+
+    두 가지로 쓰인다:
+    1. 판정이 `REQUIREMENT_GAP` blocker를 세울 때 (required_gaps)
+    2. 지원 단계가 **어느 이력서를 낼지 정할 때** (resume_title)
+
+    2번이 중요하다. 예전에는 편집기 화면에서 제목을 읽어 넘겼는데, 그 제목이
+    있는 자리의 문구가 상태에 따라 바뀌어("기본 이력서 설정" → "기본 이력서")
+    조립과 지원을 잇는 고리가 통째로 끊겼다. 기록해두면 화면에 의존하지 않는다.
+    """
     own = conn is None
     conn = conn or connect()
     try:
         conn.execute(
-            """INSERT INTO resume_builds (job_id, ok, required_gaps, gaps, built_at)
-               VALUES (?,?,?,?,?)
+            """INSERT INTO resume_builds
+                 (job_id, ok, required_gaps, gaps, track, headline, built_at)
+               VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(job_id) DO UPDATE SET
                  ok=excluded.ok, required_gaps=excluded.required_gaps,
-                 gaps=excluded.gaps, built_at=excluded.built_at""",
+                 gaps=excluded.gaps, track=excluded.track,
+                 headline=excluded.headline, built_at=excluded.built_at""",
             (job_id, 1 if ok else 0, len(required),
-             json.dumps(gaps, ensure_ascii=False), now()),
+             json.dumps(gaps, ensure_ascii=False), track, headline, now()),
         )
         conn.commit()
     finally:
@@ -596,3 +622,92 @@ def verify_screenshot(shot: str, data: dict[str, Any]) -> dict[str, Any]:
         ] if x
     )
     return vision.verify(shot, intent, context="채용 플랫폼의 이력서 편집 화면")
+
+
+def record_registration(
+    job_id: int,
+    *,
+    resume_title: str,
+    resume_url: str = "",
+    skills: list[str] | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """플랫폼에 등록된 결과를 기록한다.
+
+    지원 단계는 이 값으로 이력서를 고른다. 예전에는 편집기 화면에서 제목을
+    읽어 곧바로 넘겼는데, 그 자리의 문구가 상태에 따라 바뀌어
+    ("기본 이력서 설정" → "기본 이력서") 조립과 지원을 잇는 고리가 끊겼다.
+    한 번 기록해두면 그 뒤로는 화면 상태와 무관하다.
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        conn.execute(
+            """UPDATE resume_builds
+               SET resume_title=?, resume_url=?, skills=?
+               WHERE job_id=?""",
+            (resume_title, resume_url, json.dumps(skills or [], ensure_ascii=False), job_id),
+        )
+        conn.commit()
+    finally:
+        if own:
+            conn.close()
+
+
+def registered_title(job_id: int, conn: sqlite3.Connection | None = None) -> str:
+    """이 공고로 등록해둔 이력서 제목. 없으면 빈 문자열."""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        row = conn.execute(
+            "SELECT resume_title FROM resume_builds WHERE job_id=?", (job_id,)
+        ).fetchone()
+        return (row["resume_title"] or "") if row else ""
+    finally:
+        if own:
+            conn.close()
+
+
+def record_registration(
+    job_id: int,
+    *,
+    resume_title: str,
+    resume_url: str = "",
+    skills: list[str] | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """플랫폼에 등록된 이력서를 기록한다.
+
+    준비 단계에서 공고용 이력서를 실제로 만들어 등록해두고, 제출은 그것을
+    고르기만 한다. 그래서 승인 시점에 다시 조립·입력할 필요가 없다 —
+    사람이 검토한 그 이력서가 그대로 나간다.
+
+    화면에서 제목을 매번 읽지 않는 이유도 있다. 제목이 있는 자리의 문구가
+    상태에 따라 바뀌어("기본 이력서 설정" → "기본 이력서") 고리가 끊긴 적이 있다.
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        conn.execute(
+            "UPDATE resume_builds SET resume_title=?, resume_url=?, skills=? WHERE job_id=?",
+            (resume_title, resume_url, json.dumps(skills or [], ensure_ascii=False), job_id),
+        )
+        conn.commit()
+    finally:
+        if own:
+            conn.close()
+
+
+def registration(job_id: int, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """이 공고로 등록해둔 이력서 정보. 없으면 빈 값."""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        row = conn.execute(
+            "SELECT resume_title, resume_url, headline FROM resume_builds WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        return dict(row) if row else {}
+    finally:
+        if own:
+            conn.close()

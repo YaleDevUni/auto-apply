@@ -566,7 +566,13 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
             return added
         act.scroll_into_view_if_needed()
         page.wait_for_timeout(600)
-        act.click(force=True)
+        try:
+            # 짧게 건다. 새 이력서에는 링크 행이 없을 수 있는데, 기본 15초를
+            # 그대로 쓰면 링크 하나 때문에 전체 조립이 실패한다.
+            act.click(force=True, timeout=5000)
+        except Exception as e:  # noqa: BLE001
+            log.info("링크 행을 열지 못했다 — 링크 없이 진행: %s", type(e).__name__)
+            return added
         page.wait_for_timeout(1800)
 
     if not page.locator(LINK_NAME).count():
@@ -588,9 +594,15 @@ def _fill_links(page, links: list[dict], limit: int = 3) -> list[str]:
             (f"{LINK_URL} >> nth={min(idx, max(urls.count() - 1, 0))}", url),
         ):
             box = page.locator(sel)
-            box.click(force=True)
-            box.fill(val)
-            box.press("Tab")
+            try:
+                # 링크는 있으면 좋고 없어도 지원은 나간다. 여기서 기본 15초를
+                # 쓰면 링크 하나 때문에 이력서 전체가 실패한다 — 실제로 그랬다.
+                box.click(force=True, timeout=5000)
+                box.fill(val)
+                box.press("Tab")
+            except Exception as e:  # noqa: BLE001
+                log.info("링크 입력 실패 — 건너뜀: %s (%s)", name, type(e).__name__)
+                return added
             page.wait_for_timeout(400)
         added.append(name)
 
@@ -773,29 +785,28 @@ def finalize(page) -> bool:
     return True
 
 
+# 편집기 상단에 제목과 나란히 오는 고정 문구들. 제목이 아니다.
+TITLE_CHROME = ("이전 페이지", "기본 이력서 설정", "기본 이력서", "한국어", "영어",
+                "작성 완료", "작성 중", "포지션", "맞춤 리뷰", "이력서 리뷰")
+
+
 def read_title(page) -> str:
     """편집기 상단의 이력서 제목을 읽는다.
 
     지원 레시피가 이 제목으로 이력서를 고르므로(`li:has(span:text-is(...))`),
-    조립 → 등록 → 지원을 잇는 고리가 여기다. 제목을 못 읽으면 어느 이력서를
-    낼지 정할 수 없으므로 빈 문자열을 돌려주고 호출부가 멈추게 한다.
+    조립 → 등록 → 지원을 잇는 고리가 여기다. 못 읽으면 어느 이력서를 낼지
+    정할 수 없으므로 빈 문자열을 돌려주고 호출부가 멈춘다.
+
+    앵커 하나('기본 이력서 설정')에 기대면 안 된다 — 그 이력서가 기본으로
+    지정되면 문구가 '기본 이력서'로 바뀌어 앵커가 사라진다. 상단 줄들에서
+    고정 문구를 걷어내고 남는 첫 줄을 제목으로 본다.
     """
-    return page.evaluate(
-        """() => {
-            const anchor = [...document.querySelectorAll('*')]
-                .find(e => e.children.length === 0 && (e.innerText||'').trim() === '기본 이력서 설정');
-            if (!anchor) return '';
-            let row = anchor.closest('div');
-            for (let i = 0; i < 4 && row; i++) {
-                const btn = [...row.querySelectorAll('button')]
-                    .map(b => (b.innerText||'').trim())
-                    .filter(t => t && t !== '기본 이력서 설정');
-                if (btn.length) return btn[0];
-                row = row.parentElement;
-            }
-            return '';
-        }"""
-    ).strip()
+    lines = [ln.strip() for ln in page.inner_text("body").splitlines()[:12] if ln.strip()]
+    for ln in lines:
+        if ln in TITLE_CHROME or len(ln) > 40:
+            continue
+        return ln
+    return ""
 
 
 def open_editor(s: PlaywrightSession, *, resume_url: str | None = None) -> str:

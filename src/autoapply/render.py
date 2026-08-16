@@ -170,3 +170,73 @@ def render_latest(job_id: int) -> Path:
     if not matches:
         raise FileNotFoundError(f"공고 {job_id}의 조립된 이력서가 없다 — cli.py resume {job_id}")
     return to_pdf(matches[-1])
+
+
+def json_to_markdown(data: dict) -> str:
+    """조립 JSON을 사람이 읽는 이력서 형태로 편다. 미리보기용.
+
+    편집기 화면 대신 이걸 보여주는 이유: 미리보기는 임시 이력서 하나를 재사용해
+    채우는데, **실제 제출은 그 공고용으로 새로 만든다.** 즉 화면 사진은 제출될
+    물건이 아니다. 조립 결과를 직접 그리면 사람이 보는 것과 나가는 것이 같아진다.
+    """
+    out: list[str] = ["박예일"]
+    if data.get("headline"):
+        out += ["", data["headline"]]
+    if data.get("summary"):
+        out += ["", "간단 소개", "", data["summary"]]
+
+    exps = data.get("experiences") or []
+    if exps:
+        out += ["", "경력"]
+        for e in exps:
+            out += ["", f"  {e.get('company', '')}",
+                    f"  {e.get('start', '')} - {e.get('end', '')} · "
+                    f"{e.get('job_role', '')} {e.get('business_title', '')}".rstrip()]
+            for a in e.get("achievements") or []:
+                out += ["", f"  {a.get('title', '')}  {a.get('start', '')} - {a.get('end', '')}"]
+                out += [ln for ln in (a.get("detail") or "").splitlines() if ln.strip()]
+
+    edus = data.get("educations") or []
+    if edus:
+        out += ["", "학력"]
+        for e in edus:
+            out += ["", f"  {e.get('school', '')}",
+                    f"  {e.get('start', '')} - {e.get('end', '')} · {e.get('major', '')}"]
+            if e.get("detail"):
+                out += [f"· {e['detail']}"]
+
+    if data.get("ai_usage"):
+        out += ["", "AI 활용", "", f"· {data['ai_usage']}"]
+    if data.get("skills"):
+        out += ["", "스킬", "", ", ".join(data["skills"])]
+    if data.get("languages"):
+        out += ["", "외국어", "",
+                ", ".join(f"{l.get('name')} {l.get('level')}" for l in data["languages"])]
+    if data.get("links"):
+        out += ["", "링크", ""]
+        out += [f"{l.get('name')}: {l.get('url')}" for l in data["links"]]
+    return "\n".join(out)
+
+
+def preview_image(data: dict, out_path: Path | str) -> Path:
+    """조립 결과를 이미지 한 장으로 만든다. 폰으로 보내 사람이 판단한다."""
+    from playwright.sync_api import sync_playwright
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    html = to_html(json_to_markdown(data), title="이력서 미리보기")
+    tmp = out_path.with_suffix(".html")
+    tmp.write_text(html, encoding="utf-8")
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch(headless=True)
+            try:
+                page = b.new_page(viewport={"width": 794, "height": 1123})
+                page.goto(tmp.as_uri(), wait_until="load")
+                page.wait_for_timeout(300)
+                page.screenshot(path=str(out_path), full_page=True)
+            finally:
+                b.close()
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out_path
