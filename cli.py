@@ -453,7 +453,7 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
         except Exception as e:  # noqa: BLE001
             r = {"error": f"{type(e).__name__}: {e}"}
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
-        _report_prepared(t, r, (r.get("resume") or {}).get("data"), defer=defer)
+        _report_prepared(t, r, defer=defer)
     return {"prepared": len(out), "items": out}
 
 
@@ -530,9 +530,7 @@ def _flush_notifications() -> dict:
         conn.close()
 
 
-def _report_prepared(
-    target: dict, result: dict, data: dict | None = None, *, defer: bool = False
-) -> None:
+def _report_prepared(target: dict, result: dict, *, defer: bool = False) -> None:
     """준비 결과를 폰으로 보낸다(또는 defer=True면 나중에 보낼 큐에 쌓는다).
 
     성공이면 **스크린샷**, 실패면 이유. 실패가 로그에만 남으면 아침에 로그를
@@ -560,20 +558,14 @@ def _report_prepared(
                 telegram.notify(conn, caption)
             return
 
-        # 폰으로 보내는 사진은 **제출될 이력서 내용**이어야 한다.
-        # 편집기 화면은 임시 이력서를 재사용해 채운 것이라 실제 제출물이 아니다
-        # (제출은 그 공고용으로 새로 만든다). 조립 결과를 직접 그려 보낸다.
-        shot = apply_res.get("evidence")
-        if data:
-            try:
-                from src.autoapply.paths import EVIDENCE_DIR
-                from src.autoapply.render import preview_image
-
-                shot = str(preview_image(
-                    data, EVIDENCE_DIR / f"preview-{target['job_id']}.png"))
-            except Exception as e:  # noqa: BLE001
-                log = __import__("logging").getLogger(__name__)
-                log.warning("미리보기 이미지 생성 실패 — 화면 사진으로 대체: %s", e)
+        # 폰으로 보내는 사진은 실제 원티드 화면이어야 한다. 로컬에서 그려낸
+        # 이미지는 실제로 어떻게 보일지 안 알려준다 — 사람이 판단하는 건
+        # "이게 정말 이렇게 나갈까"이지 우리가 그린 문서가 아니다.
+        #
+        # 편집기 화면(resume.shot)을 우선한다 — 새로고침 후(=저장 확인 후)
+        # 찍은 것이라 실제로 저장된 내용이 보인다. 그게 없으면(스크린샷 실패
+        # 등) 지원 폼 화면(apply.evidence)으로 대신한다 — 그것도 실제 화면이다.
+        shot = (result.get("resume") or {}).get("shot") or apply_res.get("evidence")
 
         # 폰으로 보내기 전에 화면을 한 번 읽는다. 사람이 사진을 보고 판단하는
         # 것과 같은 층위를 기계가 먼저 훑어, 명백한 문제는 캡션에 적어 보낸다.
@@ -735,7 +727,6 @@ def _revise(job_id: int, feedback: str) -> dict:
     _report_prepared(
         {**target, "job_id": job_id, "fit_score": _fit_score(job_id)},
         result,
-        (result.get("resume") or {}).get("data"),
     )
     return {"revised": job_id, "resume": result.get("resume")}
 
@@ -878,11 +869,12 @@ def _autoapply(job_id: int, *, resume_url: str | None, live: bool) -> dict:
     result = _apply_with(job, live=live)
     return {
         "company": built["company"],
-        # data를 함께 돌려준다. 폰으로 보내는 미리보기는 **제출될 내용**을
-        # 그려야 하는데, 그 재료가 이것이다.
+        # shot은 원티드 편집기 화면을 새로고침(=저장 확인) 후 찍은 실물 사진이다
+        # (resume_editor.fill 안에서 촬영). 폰으로 보내는 미리보기는 이걸 쓴다 —
+        # 로컬에서 그려낸 이미지가 아니라 실제 그 페이지를 보여줘야 한다.
         "resume": {"title": filled["title"], "url": filled["url"],
                    "lost": filled.get("lost"), "skills": len(filled.get("skills", [])),
-                   "data": built["data"]},
+                   "shot": filled.get("shot"), "data": built["data"]},
         "apply": result,
     }
 
