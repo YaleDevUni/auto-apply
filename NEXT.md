@@ -79,9 +79,17 @@ FastAPI는 여기에 HTTP 껍데기를 씌우는 것뿐이라 지금은 필요 �
       고침(2026-08-18 새벽 회차)
 - [x] ~~봇 토큰이 로그·오류 기록에 평문으로 남는다~~ — 위 보안 섹션 3번에서
       고침(2026-08-18 새벽 회차)
-- [ ] 상주 브라우저 홀더 프로세스가 샌다 — `session.py`의 `_kill_resident()`는
-      CDP 포트를 LISTEN하는 pid(=크롬)만 죽인다. `_spawn_resident()`가 띄운
-      파이썬 홀더(`while True: time.sleep(3600)`)는 별개 pid라 아무도 안 죽인다
+- [x] ~~상주 브라우저 홀더 프로세스가 샌다~~ (2026-08-18 새벽 회차에서 고침) —
+      `_spawn_resident()`가 Popen 직후 자기 pid를 `.browser_holder_pid`에
+      남기고, `_kill_resident()`가 크롬을 죽인 뒤(또는 남의 것이라 못 죽여도)
+      항상 `_kill_holder()`로 그 pid를 마커(`PlaywrightSession(hidden=False)`)
+      확인 후 같이 정리한다. 실측: 지난 일요일 오후부터 쌓인 스트레이 홀더
+      8개 발견(전부 크롬은 죽고 Playwright driver만 매달려 있었다) — 이
+      회차에서 마커 확인 후 직접 kill로 정리함.
+      검증: `tests/test_session_resident.py` 8건 신설(pid 기록/조회, 대기
+      실패해도 홀더 pid는 남는지, 마커 일치 시 kill, pid 재활용으로 마커
+      없을 때 skip, 파일 없을 때 noop, ours/foreign 양쪽에서 홀더를 같이
+      정리하는지). pytest 161건 통과(153+8, 회귀 없음).
 - [ ] `render.py`(183줄)가 어디서도 import되지 않는다 — 죽은 코드
 - [ ] `orchestrator.py` ↔ `notify/listener.py` 순환 참조. 양쪽이 함수-지역
       import로 회피 중이라 top-level로 올리면 터진다
