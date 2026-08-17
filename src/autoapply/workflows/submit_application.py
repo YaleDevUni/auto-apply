@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 
 from .. import agent
@@ -102,7 +103,8 @@ def notify_submitted(job: dict, result: dict) -> None:
     conn = _c()
     try:
         text = (
-            f"✅ <b>제출 완료</b>\n{job.get('company')} — {str(job.get('title'))[:40]}\n"
+            f"✅ <b>제출 완료</b>\n{html.escape(str(job.get('company')))} — "
+            f"{html.escape(str(job.get('title'))[:40])}\n"
             f"<i>원장에 기록됨. 같은 자리는 다시 나가지 않습니다.</i>"
         )
         shot = result.get("evidence")

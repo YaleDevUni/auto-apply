@@ -223,7 +223,9 @@ def _cmd_targets(conn) -> str:
     if not ts:
         return "지원 대기열이 비어 있습니다."
     return "지원 대기열\n" + "\n".join(
-        f"· {t['fit_score']}점 {t['company'][:14]} — {t['title'][:26]}" for t in ts
+        f"· {t['fit_score']}점 {html.escape(t['company'][:14])} — "
+        f"{html.escape(t['title'][:26])}"
+        for t in ts
     )
 
 

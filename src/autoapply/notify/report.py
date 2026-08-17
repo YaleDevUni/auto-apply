@@ -10,6 +10,7 @@ Telegram 조각이 여기로 온다.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 
@@ -82,7 +83,10 @@ def prepared(target: dict, result: dict, *, defer: bool = False) -> None:
 
     conn = connect()
     try:
-        head = f"{target['fit_score']}점 · {target['company']} — {target['title'][:40]}"
+        head = (
+            f"{target['fit_score']}점 · {html.escape(str(target['company']))} — "
+            f"{html.escape(str(target['title'])[:40])}"
+        )
         apply_res = result.get("apply") or {}
         err = result.get("error") or apply_res.get("error") or result.get("stopped")
 
@@ -104,7 +108,7 @@ def prepared(target: dict, result: dict, *, defer: bool = False) -> None:
             return
 
         if err:
-            caption = f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{str(err)[:200]}</i>"
+            caption = f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{html.escape(str(err)[:200])}</i>"
             if defer:
                 queue(
                     conn, job_id=target.get("job_id"), caption=caption,
