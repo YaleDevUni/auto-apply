@@ -17,6 +17,7 @@ import html
 import json
 import logging
 import sys
+from contextlib import closing
 
 from src.autoapply import agent, llm, pipeline, tasks
 from src.autoapply.adapters import REGISTRY
@@ -232,176 +233,169 @@ def _task_label(args: argparse.Namespace) -> str:
 
 
 def _dispatch(args: argparse.Namespace) -> int:
-    if args.cmd == "scrape":
-        session_ok = {}
-        if args.check_session:
-            from src.autoapply.runner import check_all
+    match args.cmd:
+        case "scrape":
+            _cmd_scrape(args)
+        case "reevaluate":
+            _out(pipeline.reevaluate())
+        case "targets":
+            _out(agent.next_targets(args.limit))
+        case "blocked":
+            _out(agent.blocked_summary())
+        case "quota":
+            _out(agent.quota())
+        case "llm-cost":
+            _out(llm.cost_report(args.job_id))
+        case "browser-open":
+            _out(_browser_open())
+        case "browser-restart":
+            from src.autoapply.runner.session import restart_resident
 
-            session_ok.update(check_all(args.platform))
-        # 수동 지정이 탐침 결과를 덮는다. 사람이 아는 게 더 정확한 경우가 있다.
-        for item in args.session:
-            k, _, v = item.partition("=")
-            session_ok[k.strip()] = v.strip() not in ("0", "false", "no", "")
-        results = pipeline.run_all(args.platform, session_ok or None)
-        _out(results)
-        agent.notify_login_required()  # 세션 끊긴 플랫폼이 있으면 알린다 (쿨다운 적용)
+            ok = restart_resident()
+            _out({"재시작": "성공" if ok else "실패 — 20초 안에 CDP가 안 뜸"})
+        case "revise":
+            _out(revise_application.run(args.job_id, args.feedback))
+        case "guide":
+            _out(_guide(args.instruction, revert=args.revert, clear_session=args.clear_session))
+        case "revlog":
+            _out(_revlog(edit=args.edit, delete=args.delete, text=args.text))
+        case "builds":
+            from src.autoapply import assemble
 
-        # 중간에 멈춘 수집으로는 건강을 판정하지 않는다. 상세를 덜 받았으니
-        # NO_DETAIL이 통과분을 지배하고, actionable도 같이 주저앉는다 —
-        # 전부 "중단했으니 당연한" 값인데 경보는 "망가졌다"고 폰에 울린다.
-        # 실측(2026-08-16): 22건에서 멈춘 수집이 "NO_DETAIL이 통과분의 78%"
-        # 경보를 띄웠다.
-        if any(r.get("stopped") for r in results):
-            print("⏹ 중단된 수집이라 건강 판정은 건너뛴다", file=sys.stderr)
-        else:
+            _out(assemble.builds_log(args.limit))
+        case "health":
             from src.autoapply import health
 
-            result = health.run()  # 조용히 망가진 게 있으면 알린다
-            for f in result.get("findings", []):
-                print(f"⚠️  {f['message']}", file=sys.stderr)
-    elif args.cmd == "reevaluate":
-        _out(pipeline.reevaluate())
-    elif args.cmd == "targets":
-        _out(agent.next_targets(args.limit))
-    elif args.cmd == "blocked":
-        _out(agent.blocked_summary())
-    elif args.cmd == "quota":
-        _out(agent.quota())
-    elif args.cmd == "llm-cost":
-        _out(llm.cost_report(args.job_id))
-    elif args.cmd == "browser-open":
-        _out(_browser_open())
-    elif args.cmd == "browser-restart":
-        from src.autoapply.runner.session import restart_resident
+            _out(health.history() if args.history else health.run(notify=not args.no_notify))
+        case "status":
+            _out(agent.status())
+        case "where":
+            _out(describe())
+        case "telegram-setup":
+            with closing(connect()) as conn:
+                _out(telegram.setup(conn, args.token))
+        case "telegram-commands":
+            with closing(connect()) as conn:
+                telegram.set_commands(conn)
+            _out({"등록": [c for c, _ in telegram.BOT_COMMANDS]})
+        case "notify-login":
+            _out(agent.notify_login_required())
+        case "session-check":
+            from src.autoapply.runner import probe
 
-        ok = restart_resident()
-        _out({"재시작": "성공" if ok else "실패 — 20초 안에 CDP가 안 뜸"})
-    elif args.cmd == "revise":
-        _out(revise_application.run(args.job_id, args.feedback))
-    elif args.cmd == "guide":
-        _out(_guide(args.instruction, revert=args.revert, clear_session=args.clear_session))
-    elif args.cmd == "revlog":
-        _out(_revlog(edit=args.edit, delete=args.delete, text=args.text))
-    elif args.cmd == "builds":
-        from src.autoapply import assemble
+            result = probe.describe(args.platform)
+            _out(result)
+            if args.notify and any(v == "죽음" for v in result.values()):
+                _out(agent.notify_login_required())
+        case "listen":
+            from src.autoapply.notify import listener
 
-        _out(assemble.builds_log(args.limit))
-    elif args.cmd == "health":
+            with closing(connect()) as conn:
+                if args.watch:
+                    listener.watch(conn)
+                else:
+                    _out(listener.drain(conn))
+        case "improve" | "plan":
+            # improve는 plan의 옛 이름이다. 승인 없이 곧장 코드를 고치던 경로가
+            # 계획→(위험도)→반영 으로 바뀌었고, 두 이름을 둘 이유가 없어 합쳤다.
+            from src.autoapply import orchestrator
+
+            if args.list:
+                with closing(connect()) as conn:
+                    _out(orchestrator.gather(conn))
+            else:
+                _out(orchestrator.plan(limit=args.limit))
+        case "fix-run":
+            from src.autoapply import orchestrator
+
+            _out(orchestrator.execute(plan_id=args.plan_id))
+        case "errors":
+            from src.autoapply import errors
+
+            with closing(connect()) as conn:
+                _out(errors.summary(conn, args.limit))
+        case "plans":
+            from src.autoapply import orchestrator
+
+            with closing(connect()) as conn:
+                _out(orchestrator.recent_plans(conn))
+        case "fix-revert":
+            from src.autoapply import orchestrator
+
+            with closing(connect()) as conn:
+                _out(orchestrator.revert(conn, args.sha))
+        case "resumes":
+            _out(_resumes_report(cleanup=args.cleanup))
+        case "browser-login":
+            from src.autoapply.runner import login
+
+            _out(login())
+        case "capture":
+            from src.autoapply.runner import capture
+
+            _out(capture(context.job(args.job_id), click=args.click))
+        case "resume":
+            from src.autoapply import assemble
+
+            result = assemble.build(args.job_id, max_rounds=args.rounds)
+            body = result.pop("resume")
+            _out(result)
+            if args.print:
+                print("\n" + body)
+        case "autoapply":
+            _out(prepare_application.run(args.job_id, resume_url=args.resume_url, live=args.live))
+        case "cycle-apply":
+            _out(night_cycle.cycle_apply(args.limit, defer=args.defer))
+        case "flush-notify":
+            _out(report.flush())
+        case "night-cycle":
+            _out(night_cycle.run(args.target, defer=args.defer))
+        case "submit":
+            _out(submit_application.submit_registered(args.job_id))
+        case "apply":
+            _out(submit_application.apply_job(args.job_id, live=args.live, headless=args.headless))
+    return 0
+
+
+def _cmd_scrape(args: argparse.Namespace) -> None:
+    session_ok = {}
+    if args.check_session:
+        from src.autoapply.runner import check_all
+
+        session_ok.update(check_all(args.platform))
+    # 수동 지정이 탐침 결과를 덮는다. 사람이 아는 게 더 정확한 경우가 있다.
+    for item in args.session:
+        k, _, v = item.partition("=")
+        session_ok[k.strip()] = v.strip() not in ("0", "false", "no", "")
+    results = pipeline.run_all(args.platform, session_ok or None)
+    _out(results)
+    agent.notify_login_required()  # 세션 끊긴 플랫폼이 있으면 알린다 (쿨다운 적용)
+
+    # 중간에 멈춘 수집으로는 건강을 판정하지 않는다. 상세를 덜 받았으니
+    # NO_DETAIL이 통과분을 지배하고, actionable도 같이 주저앉는다 —
+    # 전부 "중단했으니 당연한" 값인데 경보는 "망가졌다"고 폰에 울린다.
+    # 실측(2026-08-16): 22건에서 멈춘 수집이 "NO_DETAIL이 통과분의 78%"
+    # 경보를 띄웠다.
+    if any(r.get("stopped") for r in results):
+        print("⏹ 중단된 수집이라 건강 판정은 건너뛴다", file=sys.stderr)
+    else:
         from src.autoapply import health
 
-        _out(health.history() if args.history else health.run(notify=not args.no_notify))
-    elif args.cmd == "status":
-        _out(agent.status())
-    elif args.cmd == "where":
-        _out(describe())
-    elif args.cmd == "telegram-setup":
-        conn = connect()
-        _out(telegram.setup(conn, args.token))
-        conn.close()
-    elif args.cmd == "telegram-commands":
-        conn = connect()
-        telegram.set_commands(conn)
-        _out({"등록": [c for c, _ in telegram.BOT_COMMANDS]})
-        conn.close()
-    elif args.cmd == "notify-login":
-        _out(agent.notify_login_required())
-    elif args.cmd == "session-check":
-        from src.autoapply.runner import probe
+        result = health.run()  # 조용히 망가진 게 있으면 알린다
+        for f in result.get("findings", []):
+            print(f"⚠️  {f['message']}", file=sys.stderr)
 
-        result = probe.describe(args.platform)
-        _out(result)
-        if args.notify and any(v == "죽음" for v in result.values()):
-            _out(agent.notify_login_required())
-    elif args.cmd == "listen":
-        from src.autoapply.notify import listener
 
-        conn = connect()
-        try:
-            if args.watch:
-                listener.watch(conn)
-            else:
-                _out(listener.drain(conn))
-        finally:
-            conn.close()
-    elif args.cmd in ("improve", "plan"):
-        # improve는 plan의 옛 이름이다. 승인 없이 곧장 코드를 고치던 경로가
-        # 계획→(위험도)→반영 으로 바뀌었고, 두 이름을 둘 이유가 없어 합쳤다.
-        from src.autoapply import orchestrator
+def _resumes_report(*, cleanup: bool) -> dict:
+    from src.autoapply.runner import resume_editor
 
-        if args.list:
-            conn = connect()
-            _out(orchestrator.gather(conn))
-            conn.close()
-        else:
-            _out(orchestrator.plan(limit=args.limit))
-    elif args.cmd == "fix-run":
-        from src.autoapply import orchestrator
-
-        _out(orchestrator.execute(plan_id=args.plan_id))
-    elif args.cmd == "errors":
-        from src.autoapply import errors
-
-        conn = connect()
-        try:
-            _out(errors.summary(conn, args.limit))
-        finally:
-            conn.close()
-    elif args.cmd == "plans":
-        from src.autoapply import orchestrator
-
-        conn = connect()
-        try:
-            _out(orchestrator.recent_plans(conn))
-        finally:
-            conn.close()
-    elif args.cmd == "fix-revert":
-        from src.autoapply import orchestrator
-
-        conn = connect()
-        try:
-            _out(orchestrator.revert(conn, args.sha))
-        finally:
-            conn.close()
-    elif args.cmd == "resumes":
-        from src.autoapply.runner import resume_editor
-
-        if args.cleanup:
-            _out(resume_editor.cleanup(dry_run=False))
-        else:
-            _out({
-                "보호(편집·삭제 금지)": sorted(resume_editor.protected_titles()),
-                "정리 예정": resume_editor.cleanup(dry_run=True),
-                "안내": "실제로 지우려면 --cleanup. 로컬 사본(profile/generated)은 남습니다",
-            })
-    elif args.cmd == "browser-login":
-        from src.autoapply.runner import login
-
-        _out(login())
-    elif args.cmd == "capture":
-        from src.autoapply.runner import capture
-
-        _out(capture(context.job(args.job_id), click=args.click))
-    elif args.cmd == "resume":
-        from src.autoapply import assemble
-
-        result = assemble.build(args.job_id, max_rounds=args.rounds)
-        body = result.pop("resume")
-        _out(result)
-        if args.print:
-            print("\n" + body)
-    elif args.cmd == "autoapply":
-        _out(prepare_application.run(args.job_id, resume_url=args.resume_url, live=args.live))
-    elif args.cmd == "cycle-apply":
-        _out(night_cycle.cycle_apply(args.limit, defer=args.defer))
-    elif args.cmd == "flush-notify":
-        _out(report.flush())
-    elif args.cmd == "night-cycle":
-        _out(night_cycle.run(args.target, defer=args.defer))
-    elif args.cmd == "submit":
-        _out(submit_application.submit_registered(args.job_id))
-    elif args.cmd == "apply":
-        _out(submit_application.apply_job(args.job_id, live=args.live, headless=args.headless))
-    return 0
+    if cleanup:
+        return resume_editor.cleanup(dry_run=False)
+    return {
+        "보호(편집·삭제 금지)": sorted(resume_editor.protected_titles()),
+        "정리 예정": resume_editor.cleanup(dry_run=True),
+        "안내": "실제로 지우려면 --cleanup. 로컬 사본(profile/generated)은 남습니다",
+    }
 
 
 def _browser_open() -> dict:
