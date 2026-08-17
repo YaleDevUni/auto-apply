@@ -4,6 +4,15 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$HOME/Library/LaunchAgents" "$REPO/data/logs"
 
+# 커밋 훅을 건다. core.hooksPath는 .git/config에 들어가는 값이라 저장소에
+# 딸려오지 않는다 — 새로 클론하면 훅이 꺼진 채로 시작한다. 여기서 켠다.
+#
+# 이 훅이 막는 것: 심볼릭 링크 커밋과 data/·profile/ 추적. 2026-08-17에
+# 워크트리에서 만든 심볼릭 링크가 커밋에 실려 갔고, 병합하면서 git이 그
+# 링크를 진짜 디렉터리 자리에 체크아웃해 jobs.db와 이력서 원본을 지웠다.
+git -C "$REPO" config core.hooksPath .githooks
+echo "커밋 훅 등록: $(git -C "$REPO" config --get core.hooksPath)"
+
 # scrape — 12:00 한 번. 수집 + 판정만
 # night  — 02:00 한 번. 지원준비를 목표건수/대기열 소진까지(수집은 안 함). 알림은 안 보냄
 # flush  — 09:00 한 번. 밤사이 쌓인 알림을 몰아서 보냄

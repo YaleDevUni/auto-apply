@@ -1,1 +1,0 @@
-/Users/yeilpark/auto-apply/profile
