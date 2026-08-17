@@ -1233,6 +1233,24 @@ def fill(
         }
         lost = [k for k, ok in persisted.items() if not ok]
 
+        # 스킬은 `_fields()`에 없는 칩 UI라 위 대조에서 빠진다 — 그래서 prune
+        # 켰을 때의 "11개 → 1개" 손실(NEXT.md)이 실측 전까지 안 보였다. prune은
+        # 계속 꺼둔 채로, 여기서만 새로고침 후 칩을 다시 읽어 관찰한다.
+        # `ok`에는 안 넣는다 — 손실의 원인(저장 타이밍 vs 다른 문제)이 아직
+        # 미확인이라, 지금 넣으면 원인 모를 실패로 하위 워크플로를 막을 수 있다.
+        skills_persisted: list[str] = []
+        skills_lost: list[str] = []
+        if "skills" in steps and skills:
+            after_reload_chips = set(_chip_labels(p))
+            skills_persisted = [sk for sk in skills if sk in after_reload_chips]
+            skills_lost = [sk for sk in skills if sk not in after_reload_chips]
+            if skills_lost:
+                log.warning(
+                    "스킬 %d/%d개가 새로고침 후 사라짐 — 추가는 됐는데 저장은 안 된 "
+                    "것으로 보임: %s",
+                    len(skills_lost), len(skills), ", ".join(skills_lost[:10]),
+                )
+
         # 화면을 남긴다. 나중에 "왜 이렇게 됐나"를 물을 때 그때의 화면이
         # 없으면 추측밖에 못 한다 — 자가개선 에이전트가 셀렉터를 추측으로
         # 고친 적이 있고, 그 고침은 틀렸다.
@@ -1264,6 +1282,7 @@ def fill(
             "dates": dates, "selects": selects, "finalized": finalized,
             "audit": page_audit, "shot": shot,
             "skills": skills, "skills_skipped": skills_skipped,
+            "skills_persisted": skills_persisted, "skills_lost": skills_lost,
             "links": links, "languages": langs,
             "ok": not lost,
             "prefilled_skipped": list(PREFILLED),
