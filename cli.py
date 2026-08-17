@@ -24,7 +24,8 @@ from src.autoapply.db import connect
 from src.autoapply.notify import report, telegram
 from src.autoapply.paths import describe
 from src.autoapply.workflows import (
-    context, night_cycle, prepare_application, submit_application,
+    context, night_cycle, prepare_application, revise_application,
+    submit_application,
 )
 
 
@@ -267,7 +268,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.cmd == "quota":
         _out(agent.quota())
     elif args.cmd == "llm-cost":
-        _out(_llm_cost(args.job_id))
+        _out(llm.cost_report(args.job_id))
     elif args.cmd == "browser-open":
         _out(_browser_open())
     elif args.cmd == "browser-restart":
@@ -276,41 +277,15 @@ def _dispatch(args: argparse.Namespace) -> int:
         ok = restart_resident()
         _out({"재시작": "성공" if ok else "실패 — 20초 안에 CDP가 안 뜸"})
     elif args.cmd == "revise":
-        _out(_revise(args.job_id, args.feedback))
+        _out(revise_application.run(args.job_id, args.feedback))
     elif args.cmd == "guide":
         _out(_guide(args.instruction, revert=args.revert, clear_session=args.clear_session))
     elif args.cmd == "revlog":
         _out(_revlog(edit=args.edit, delete=args.delete, text=args.text))
     elif args.cmd == "builds":
-        conn = connect()
-        try:
-            rows = conn.execute(
-                """SELECT b.job_id, j.company, b.resume_title, b.completeness,
-                          b.required_gaps, b.fill_report, b.built_at,
-                          b.stage, b.stage_at, b.stage_error
-                   FROM resume_builds b LEFT JOIN jobs j ON j.id = b.job_id
-                   ORDER BY b.built_at DESC LIMIT ?""",
-                (args.limit,),
-            ).fetchall()
-        finally:
-            conn.close()
-        out = []
-        for r in rows:
-            rep = json.loads(r["fill_report"] or "{}")
-            out.append({
-                "job_id": r["job_id"], "회사": r["company"],
-                # 어디까지 갔나. 'filling'이 남아 있으면 채우다 끊긴 것이라
-                # 다음 실행이 그 이력서를 버리고 새로 만든다.
-                "단계": r["stage"], "단계시각": r["stage_at"],
-                **({"단계오류": r["stage_error"][:120]} if r["stage_error"] else {}),
-                "이력서": r["resume_title"], "완성도": r["completeness"],
-                "필수미충족": r["required_gaps"],
-                "저장안됨": rep.get("lost") or [],
-                "플랫폼이 요구": rep.get("platform_todo") or [],
-                "스킬누락": rep.get("skills_skipped") or [],
-                "작성완료": rep.get("finalized"),
-            })
-        _out(out)
+        from src.autoapply import assemble
+
+        _out(assemble.builds_log(args.limit))
     elif args.cmd == "health":
         from src.autoapply import health
 
@@ -372,12 +347,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         finally:
             conn.close()
     elif args.cmd == "plans":
+        from src.autoapply import orchestrator
+
         conn = connect()
         try:
-            _out([dict(r) for r in conn.execute(
-                "SELECT id, created_at, title, risk, auto, status, branch, commit_sha "
-                "FROM fix_plans ORDER BY id DESC LIMIT 12"
-            )])
+            _out(orchestrator.recent_plans(conn))
         finally:
             conn.close()
     elif args.cmd == "fix-revert":
@@ -459,54 +433,6 @@ def _browser_open() -> dict:
     return {"실패": "브라우저가 20초 안에 안 떴다"}
 
 
-def _revise(job_id: int, feedback: str) -> dict:
-    """사람의 수정 요청을 반영해 다시 만들고, 검토를 다시 요청한다.
-
-    캐시를 건너뛰고 조립부터 다시 한다 — 피드백은 입력이 바뀐 것이라서
-    캐시된 결과를 재사용하면 요청이 반영되지 않는다.
-
-    앞서 만든 이력서는 플랫폼에 그대로 두고 새로 만든다. 지우려면 브라우저를
-    한 번 더 띄워야 하고, 그 사이에 실패하면 아무것도 없는 상태가 된다.
-    정리는 `resumes --cleanup`이 나중에 한다.
-    """
-    from src.autoapply import assemble
-
-    log = logging.getLogger(__name__)
-    log.info("공고 %s 재작성 — %s", job_id, feedback[:80])
-
-    # 원장에 먼저 남긴다. 그래야 이번 지시가 원장에 들어간 상태로 조립되고,
-    # 같은 공고에 두 번째 요청이 와도 첫 번째가 남아 있다.
-    #
-    # 기록한 줄은 폰으로 되돌려준다. 요약이 지시를 잘못 옮기는 경우가 있는데
-    # (특히 '짧게' 같은 한 단어), 그 줄은 앞으로 모든 이력서 프롬프트에 실려
-    # 나가므로 사람이 바로 알아보고 파일에서 고칠 수 있어야 한다.
-    try:
-        entry = assemble.append_revision(job_id, feedback)
-        report.tell(f"📒 <b>원장 기록</b>\n<code>{html.escape(entry)}</code>\n"
-                    f"<i>틀렸으면 {assemble.REVISION_LOG.name} 에서 그 줄을 고치세요.</i>")
-    except Exception as e:  # noqa: BLE001
-        log.warning("원장 기록 실패(재작성은 계속): %s", e)
-
-    built = assemble.build_editor_json(job_id, feedback=feedback)
-    if not built["ok"]:
-        report.tell(f"❌ <b>재작성 중단</b> — 공고 {job_id}\n"
-                    f"필수요건 미충족 {built['required_gaps']}건\n"
-                    "<i>수정 요청이 사실 저장소에 없는 내용을 요구했을 수 있습니다.</i>")
-        return {"stopped": "재작성 후에도 필수요건 미충족", "gaps": built["required_gaps"]}
-
-    # **이어받지 않는다.** 재작성은 "이번엔 다르게 써 달라"는 요청이므로,
-    # 지난번에 등록해둔 이력서를 재사용하면 지시가 통째로 무시된 채 옛 이력서가
-    # "재작성됨"으로 폰에 다시 올라간다 — 사람은 고쳐진 줄 알고 승인한다.
-    result = prepare_application.run(job_id, resume_url=None, live=False, reuse=False)
-    target = context.job(job_id)
-    target["fit_score"] = target.get("fit_score") or 0
-    report.prepared(
-        {**target, "job_id": job_id, "fit_score": _fit_score(job_id)},
-        result,
-    )
-    return {"revised": job_id, "resume": result.get("resume")}
-
-
 def _guide(instruction: str, *, revert: bool, clear_session: bool = False) -> dict:
     """작성 가이드를 고치거나, 마지막 백업으로 되돌리거나, 이어가던 대화를 끊는다.
 
@@ -566,87 +492,6 @@ def _revlog(*, edit: int | None, delete: int | None, text: str) -> dict:
 
     entries = assemble.log_entries()
     return {"entries": entries, "count": len(entries)}
-
-
-def _fit_score(job_id: int) -> int:
-    conn = connect()
-    try:
-        row = conn.execute(
-            "SELECT fit_score FROM screening WHERE job_id=?", (job_id,)
-        ).fetchone()
-        return int(row["fit_score"]) if row and row["fit_score"] is not None else 0
-    finally:
-        conn.close()
-
-
-def _llm_cost(job_id: int | None) -> dict:
-    """LLM 호출 비용을 job_id로 묶어 보여준다.
-
-    write·review·to_editor_json·portfolio_match·summary_ensure가 로그
-    파일 여기저기 흩어져 있어, "이 공고 하나에 LLM을 얼마나 썼나"를
-    답하려면 이 집계가 필요하다(`llm_calls` 테이블, `llm.py _log_cost` 참고).
-    """
-    conn = connect()
-    try:
-        if job_id is not None:
-            rows = conn.execute(
-                """SELECT phase, COUNT(*) AS calls,
-                          SUM(COALESCE(input_tokens,0) + COALESCE(cache_read_tokens,0)
-                              + COALESCE(cache_write_tokens,0)) AS in_tok,
-                          SUM(COALESCE(cache_read_tokens,0)) AS cr,
-                          SUM(COALESCE(cache_write_tokens,0)) AS cw,
-                          SUM(output_tokens) AS out_tok, SUM(cost_usd) AS cost
-                   FROM llm_calls WHERE job_id=? GROUP BY phase ORDER BY phase""",
-                (job_id,),
-            ).fetchall()
-            if not rows:
-                return {"job_id": job_id, "안내": "기록 없음 — 아직 조립 안 했거나 이 기능 이전 데이터"}
-            total = conn.execute(
-                """SELECT COUNT(*) AS calls,
-                          SUM(COALESCE(input_tokens,0) + COALESCE(cache_read_tokens,0)
-                              + COALESCE(cache_write_tokens,0)) AS in_tok,
-                          SUM(COALESCE(cache_read_tokens,0)) AS cr,
-                          SUM(COALESCE(cache_write_tokens,0)) AS cw,
-                          SUM(output_tokens) AS out_tok, SUM(cost_usd) AS cost
-                   FROM llm_calls WHERE job_id=?""",
-                (job_id,),
-            ).fetchone()
-            return {
-                "job_id": job_id,
-                "phases": [
-                    {"phase": r["phase"], "호출": r["calls"], "입력토큰": r["in_tok"],
-                     "캐시읽기": r["cr"], "캐시쓰기": r["cw"],
-                     "출력토큰": r["out_tok"], "비용_usd": round(r["cost"] or 0, 4)}
-                    for r in rows
-                ],
-                "합계": {"호출": total["calls"], "입력토큰": total["in_tok"],
-                        "캐시읽기": total["cr"], "캐시쓰기": total["cw"],
-                        "출력토큰": total["out_tok"], "비용_usd": round(total["cost"] or 0, 4)},
-                # 입력 토큰은 단가가 셋으로 갈린다(기본 입력 / 캐시 쓰기 / 캐시 읽기).
-                # 그래서 토큰 합으로 비용을 되짚지 말고 비용은 cost_usd를 본다.
-                "주의": "입력토큰은 캐시읽기·캐시쓰기를 포함한 합. 단가가 달라 토큰으로 비용을 환산하면 안 된다",
-            }
-
-        rows = conn.execute(
-            """SELECT l.job_id, j.company, j.title, COUNT(*) AS calls,
-                      SUM(COALESCE(l.input_tokens,0) + COALESCE(l.cache_read_tokens,0)
-                          + COALESCE(l.cache_write_tokens,0)) AS in_tok,
-                      SUM(l.output_tokens) AS out_tok,
-                      SUM(l.cost_usd) AS cost, MAX(l.called_at) AS last
-               FROM llm_calls l LEFT JOIN jobs j ON j.id = l.job_id
-               WHERE l.job_id IS NOT NULL
-               GROUP BY l.job_id ORDER BY last DESC LIMIT 20"""
-        ).fetchall()
-        return {
-            "최근_20건": [
-                {"job_id": r["job_id"], "회사": r["company"], "공고": r["title"],
-                 "호출": r["calls"], "입력토큰": r["in_tok"], "출력토큰": r["out_tok"],
-                 "비용_usd": round(r["cost"] or 0, 4)}
-                for r in rows
-            ],
-        }
-    finally:
-        conn.close()
 
 
 if __name__ == "__main__":

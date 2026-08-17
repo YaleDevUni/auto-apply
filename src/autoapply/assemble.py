@@ -1595,3 +1595,39 @@ def submitted_titles(conn: sqlite3.Connection | None = None) -> set[str]:
     finally:
         if own:
             conn.close()
+
+
+def builds_log(limit: int = 8) -> list[dict[str, Any]]:
+    """조립·등록 기록 — 어디까지 갔고 왜 미완인지.
+
+    `cli.py builds`가 쓴다. 'filling'이 남아 있으면 채우다 끊긴 것이라
+    다음 실행이 그 이력서를 버리고 새로 만든다(`progress`의 재사용 규칙).
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """SELECT b.job_id, j.company, b.resume_title, b.completeness,
+                      b.required_gaps, b.fill_report, b.built_at,
+                      b.stage, b.stage_at, b.stage_error
+               FROM resume_builds b LEFT JOIN jobs j ON j.id = b.job_id
+               ORDER BY b.built_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out = []
+    for r in rows:
+        rep = json.loads(r["fill_report"] or "{}")
+        out.append({
+            "job_id": r["job_id"], "회사": r["company"],
+            "단계": r["stage"], "단계시각": r["stage_at"],
+            **({"단계오류": r["stage_error"][:120]} if r["stage_error"] else {}),
+            "이력서": r["resume_title"], "완성도": r["completeness"],
+            "필수미충족": r["required_gaps"],
+            "저장안됨": rep.get("lost") or [],
+            "플랫폼이 요구": rep.get("platform_todo") or [],
+            "스킬누락": rep.get("skills_skipped") or [],
+            "작성완료": rep.get("finalized"),
+        })
+    return out

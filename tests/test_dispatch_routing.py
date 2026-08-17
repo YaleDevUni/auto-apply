@@ -114,16 +114,33 @@ def test_flush_notify(monkeypatch, capsys):
     assert calls == [((), {})]
 
 
-def test_revise(spy):
-    spy("_revise")
-    spy.dispatch(cmd="revise", job_id=7, feedback="짧게")
-    assert spy.calls == [((7, "짧게"), {})]
+def test_revise(spy_module):
+    spy_module(cli.revise_application, "run")
+    spy_module.dispatch(cmd="revise", job_id=7, feedback="짧게")
+    assert spy_module.calls == [((7, "짧게"), {})]
 
 
-def test_llm_cost(spy):
-    spy("_llm_cost", returns={})
-    spy.dispatch(cmd="llm-cost", job_id=None)
-    assert spy.calls == [((None,), {})]
+def test_llm_cost(spy_module):
+    spy_module(cli.llm, "cost_report")
+    spy_module.dispatch(cmd="llm-cost", job_id=None)
+    assert spy_module.calls == [((None,), {})]
+
+
+def test_builds_and_plans_have_no_sql_in_cli():
+    """CLAUDE.md §10 — CLI는 DB business query를 갖지 않는다.
+
+    이건 이동으로 바뀌지 않아야 하는 단정이라 이름으로 patch하지 않고
+    소스를 직접 본다.
+    """
+    import pathlib
+
+    src = pathlib.Path(cli.__file__).read_text(encoding="utf-8")
+    # `.execute(`만 보면 orchestrator.execute(plan_id=…)가 걸린다 — 그건 계획
+    # 수행이지 SQL이 아니다. 커서를 여는 쪽만 본다.
+    for sql in ("conn.execute(", "cursor.execute(", "executemany("):
+        assert sql not in src, f"cli.py에 직접 SQL이 다시 들어왔다: {sql}"
+    for table in ("SELECT ", "INSERT ", "UPDATE ", "resume_builds", "fix_plans", "llm_calls"):
+        assert table not in src, f"cli.py가 {table!r}를 다시 알게 됐다"
 
 
 def test_browser_open(spy):

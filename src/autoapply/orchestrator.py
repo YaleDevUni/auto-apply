@@ -1023,3 +1023,15 @@ def recent_auto_commits(conn: sqlite3.Connection, limit: int = 8) -> list[dict[s
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def recent_plans(conn: sqlite3.Connection, limit: int = 12) -> list[dict[str, Any]]:
+    """최근 수정 계획 — `cli.py plans`가 쓴다.
+
+    `fix_plans`는 이 모듈이 쓰고 이 모듈이 읽는다. CLI가 직접 SELECT 하면
+    상태값(pending/approved/demoted/done)의 뜻이 두 곳으로 갈린다.
+    """
+    return [dict(r) for r in conn.execute(
+        "SELECT id, created_at, title, risk, auto, status, branch, commit_sha "
+        "FROM fix_plans ORDER BY id DESC LIMIT ?", (limit,)
+    )]

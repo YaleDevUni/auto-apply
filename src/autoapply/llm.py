@@ -421,3 +421,75 @@ def _log_cost(
             conn.close()
     except Exception as e:  # noqa: BLE001
         log.debug("토큰 사용 기록 실패(무시): %s", e)
+
+
+def cost_report(job_id: int | None) -> dict:
+    """LLM 호출 비용을 job_id로 묶어 보여준다. `cli.py llm-cost`가 쓴다.
+
+    write·review·to_editor_json·portfolio_match·summary_ensure가 로그
+    파일 여기저기 흩어져 있어, "이 공고 하나에 LLM을 얼마나 썼나"를
+    답하려면 이 집계가 필요하다(`llm_calls` 테이블, `llm.py _log_cost` 참고).
+    """
+    from .db import connect   # _log_cost와 같은 자리에서 같은 방식으로 얻는다
+
+    conn = connect()
+    try:
+        if job_id is not None:
+            rows = conn.execute(
+                """SELECT phase, COUNT(*) AS calls,
+                          SUM(COALESCE(input_tokens,0) + COALESCE(cache_read_tokens,0)
+                              + COALESCE(cache_write_tokens,0)) AS in_tok,
+                          SUM(COALESCE(cache_read_tokens,0)) AS cr,
+                          SUM(COALESCE(cache_write_tokens,0)) AS cw,
+                          SUM(output_tokens) AS out_tok, SUM(cost_usd) AS cost
+                   FROM llm_calls WHERE job_id=? GROUP BY phase ORDER BY phase""",
+                (job_id,),
+            ).fetchall()
+            if not rows:
+                return {"job_id": job_id, "안내": "기록 없음 — 아직 조립 안 했거나 이 기능 이전 데이터"}
+            total = conn.execute(
+                """SELECT COUNT(*) AS calls,
+                          SUM(COALESCE(input_tokens,0) + COALESCE(cache_read_tokens,0)
+                              + COALESCE(cache_write_tokens,0)) AS in_tok,
+                          SUM(COALESCE(cache_read_tokens,0)) AS cr,
+                          SUM(COALESCE(cache_write_tokens,0)) AS cw,
+                          SUM(output_tokens) AS out_tok, SUM(cost_usd) AS cost
+                   FROM llm_calls WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+            return {
+                "job_id": job_id,
+                "phases": [
+                    {"phase": r["phase"], "호출": r["calls"], "입력토큰": r["in_tok"],
+                     "캐시읽기": r["cr"], "캐시쓰기": r["cw"],
+                     "출력토큰": r["out_tok"], "비용_usd": round(r["cost"] or 0, 4)}
+                    for r in rows
+                ],
+                "합계": {"호출": total["calls"], "입력토큰": total["in_tok"],
+                        "캐시읽기": total["cr"], "캐시쓰기": total["cw"],
+                        "출력토큰": total["out_tok"], "비용_usd": round(total["cost"] or 0, 4)},
+                # 입력 토큰은 단가가 셋으로 갈린다(기본 입력 / 캐시 쓰기 / 캐시 읽기).
+                # 그래서 토큰 합으로 비용을 되짚지 말고 비용은 cost_usd를 본다.
+                "주의": "입력토큰은 캐시읽기·캐시쓰기를 포함한 합. 단가가 달라 토큰으로 비용을 환산하면 안 된다",
+            }
+
+        rows = conn.execute(
+            """SELECT l.job_id, j.company, j.title, COUNT(*) AS calls,
+                      SUM(COALESCE(l.input_tokens,0) + COALESCE(l.cache_read_tokens,0)
+                          + COALESCE(l.cache_write_tokens,0)) AS in_tok,
+                      SUM(l.output_tokens) AS out_tok,
+                      SUM(l.cost_usd) AS cost, MAX(l.called_at) AS last
+               FROM llm_calls l LEFT JOIN jobs j ON j.id = l.job_id
+               WHERE l.job_id IS NOT NULL
+               GROUP BY l.job_id ORDER BY last DESC LIMIT 20"""
+        ).fetchall()
+        return {
+            "최근_20건": [
+                {"job_id": r["job_id"], "회사": r["company"], "공고": r["title"],
+                 "호출": r["calls"], "입력토큰": r["in_tok"], "출력토큰": r["out_tok"],
+                 "비용_usd": round(r["cost"] or 0, 4)}
+                for r in rows
+            ],
+        }
+    finally:
+        conn.close()
