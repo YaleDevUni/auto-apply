@@ -283,7 +283,9 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     job_id        INTEGER,
     phase         TEXT NOT NULL,   -- write|review|to_editor_json|portfolio_match|summary_ensure|revision_summary|guide_edit|vision|...
     model         TEXT,
-    input_tokens  INTEGER,
+    input_tokens  INTEGER,             -- 캐시에 안 걸린 나머지. 보통 한 자릿수다
+    cache_read_tokens  INTEGER,        -- 캐시 적중분 (가장 싸다)
+    cache_write_tokens INTEGER,        -- 캐시 기록분 (기본 입력보다 비싸다)
     output_tokens INTEGER,
     cost_usd      REAL,
     duration_ms   INTEGER,
@@ -466,6 +468,16 @@ def now() -> str:
 # 캐시에 가깝다. 유일하게 못 지우는 건 apply_ledger(중복지원 방어)인데 그건
 # 스키마가 안 바뀐다. 도구를 들이는 비용이 얻는 것보다 크다.
 MIGRATIONS: dict[str, dict[str, str]] = {
+    # `input_tokens`만 남기면 **거의 항상 한 자릿수가 찍힌다.** claude CLI는 프롬프트
+    # 대부분을 캐시로 처리하고 그 양을 `cache_read_input_tokens`·
+    # `cache_creation_input_tokens`에 따로 담기 때문이다(실측: 프롬프트 6,400자에
+    # input_tokens=10, cache_creation=28,988). 이 둘을 안 적으면 "이 공고에 토큰을
+    # 얼마나 썼나"에 답할 수 없고, 단가가 다른 세 종류(입력·캐시쓰기·캐시읽기)를
+    # 갈라 볼 수도 없다. 비용 자체는 CLI가 계산해 준 `total_cost_usd`를 쓴다.
+    "llm_calls": {
+        "cache_read_tokens": "INTEGER",
+        "cache_write_tokens": "INTEGER",
+    },
     # 사람이 '폐기'를 누른 공고. applicability에 적으면 reevaluate가 덮어써서
     # 폐기가 풀린다 — 판정은 다시 계산되는 값이지만 사람의 결정은 아니다.
     "jobs": {"dropped_at": "TEXT"},

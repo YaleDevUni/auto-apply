@@ -385,10 +385,17 @@ def _log_cost(
     작성이 멈추면 안 된다.
     """
     usage = payload.get("usage") or {}
+    # 입력은 세 갈래로 온다. `input_tokens`만 보면 프롬프트가 2만 자여도 한 자릿수가
+    # 찍힌다 — 나머지는 캐시 필드에 들어 있다(실측: input 10 / cache_creation 28,988).
+    # 단가도 셋이 다르다(캐시 읽기가 가장 싸고, 캐시 쓰기가 기본 입력보다 비싸다).
+    # 그래서 합계와 내역을 같이 남긴다. 비용은 CLI가 계산한 값을 그대로 쓴다.
+    plain = usage.get("input_tokens") or 0
+    cache_read = usage.get("cache_read_input_tokens") or 0
+    cache_write = usage.get("cache_creation_input_tokens") or 0
     tag = f" [{phase or '?'} job={job_id}]" if phase or job_id is not None else ""
     log.info(
-        "claude 응답 — 입력 %s토큰 / 출력 %s토큰 / $%s / %ss%s",
-        usage.get("input_tokens", "?"),
+        "claude 응답 — 입력 %s토큰(캐시읽기 %s/쓰기 %s) / 출력 %s토큰 / $%s / %ss%s",
+        plain + cache_read + cache_write, cache_read, cache_write,
         usage.get("output_tokens", "?"),
         round(payload.get("total_cost_usd", 0), 4),
         round(payload.get("duration_ms", 0) / 1000, 1),
@@ -401,11 +408,12 @@ def _log_cost(
         try:
             conn.execute(
                 """INSERT INTO llm_calls
-                     (job_id, phase, model, input_tokens, output_tokens,
+                     (job_id, phase, model, input_tokens, cache_read_tokens,
+                      cache_write_tokens, output_tokens,
                       cost_usd, duration_ms, called_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, phase or "", model,
-                 usage.get("input_tokens"), usage.get("output_tokens"),
+                 plain, cache_read, cache_write, usage.get("output_tokens"),
                  payload.get("total_cost_usd"), payload.get("duration_ms"), now()),
             )
             conn.commit()

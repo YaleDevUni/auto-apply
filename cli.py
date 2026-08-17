@@ -1051,15 +1051,22 @@ def _llm_cost(job_id: int | None) -> dict:
         if job_id is not None:
             rows = conn.execute(
                 """SELECT phase, COUNT(*) AS calls,
-                          SUM(input_tokens) AS in_tok, SUM(output_tokens) AS out_tok,
-                          SUM(cost_usd) AS cost
+                          SUM(COALESCE(input_tokens,0) + COALESCE(cache_read_tokens,0)
+                              + COALESCE(cache_write_tokens,0)) AS in_tok,
+                          SUM(COALESCE(cache_read_tokens,0)) AS cr,
+                          SUM(COALESCE(cache_write_tokens,0)) AS cw,
+                          SUM(output_tokens) AS out_tok, SUM(cost_usd) AS cost
                    FROM llm_calls WHERE job_id=? GROUP BY phase ORDER BY phase""",
                 (job_id,),
             ).fetchall()
             if not rows:
                 return {"job_id": job_id, "안내": "기록 없음 — 아직 조립 안 했거나 이 기능 이전 데이터"}
             total = conn.execute(
-                """SELECT COUNT(*) AS calls, SUM(input_tokens) AS in_tok,
+                """SELECT COUNT(*) AS calls,
+                          SUM(COALESCE(input_tokens,0) + COALESCE(cache_read_tokens,0)
+                              + COALESCE(cache_write_tokens,0)) AS in_tok,
+                          SUM(COALESCE(cache_read_tokens,0)) AS cr,
+                          SUM(COALESCE(cache_write_tokens,0)) AS cw,
                           SUM(output_tokens) AS out_tok, SUM(cost_usd) AS cost
                    FROM llm_calls WHERE job_id=?""",
                 (job_id,),
@@ -1068,16 +1075,23 @@ def _llm_cost(job_id: int | None) -> dict:
                 "job_id": job_id,
                 "phases": [
                     {"phase": r["phase"], "호출": r["calls"], "입력토큰": r["in_tok"],
+                     "캐시읽기": r["cr"], "캐시쓰기": r["cw"],
                      "출력토큰": r["out_tok"], "비용_usd": round(r["cost"] or 0, 4)}
                     for r in rows
                 ],
                 "합계": {"호출": total["calls"], "입력토큰": total["in_tok"],
+                        "캐시읽기": total["cr"], "캐시쓰기": total["cw"],
                         "출력토큰": total["out_tok"], "비용_usd": round(total["cost"] or 0, 4)},
+                # 입력 토큰은 단가가 셋으로 갈린다(기본 입력 / 캐시 쓰기 / 캐시 읽기).
+                # 그래서 토큰 합으로 비용을 되짚지 말고 비용은 cost_usd를 본다.
+                "주의": "입력토큰은 캐시읽기·캐시쓰기를 포함한 합. 단가가 달라 토큰으로 비용을 환산하면 안 된다",
             }
 
         rows = conn.execute(
             """SELECT l.job_id, j.company, j.title, COUNT(*) AS calls,
-                      SUM(l.input_tokens) AS in_tok, SUM(l.output_tokens) AS out_tok,
+                      SUM(COALESCE(l.input_tokens,0) + COALESCE(l.cache_read_tokens,0)
+                          + COALESCE(l.cache_write_tokens,0)) AS in_tok,
+                      SUM(l.output_tokens) AS out_tok,
                       SUM(l.cost_usd) AS cost, MAX(l.called_at) AS last
                FROM llm_calls l LEFT JOIN jobs j ON j.id = l.job_id
                WHERE l.job_id IS NOT NULL
