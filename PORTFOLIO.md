@@ -363,4 +363,4 @@ src/autoapply/
 
 ---
 
-작업 기준 문서는 [TODO.md](TODO.md)에, 함정과 그 이유는 [NEXT.md](NEXT.md)에 있습니다.
+작업 큐는 [NEXT.md](NEXT.md)에, 지난 결정의 근거와 실측은 git 로그에 있습니다.
