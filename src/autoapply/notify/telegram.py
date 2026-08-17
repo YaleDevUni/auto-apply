@@ -213,7 +213,7 @@ def notify(conn: sqlite3.Connection, text: str) -> bool:
     try:
         token, chat = _creds(conn)
         _call(
-            token, "sendMessage", chat_id=chat, text=text,
+            token, "sendMessage", chat_id=chat, text=text[:4096],
             parse_mode="HTML", disable_web_page_preview=True,
         )
         return True
