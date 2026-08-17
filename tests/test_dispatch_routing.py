@@ -84,10 +84,13 @@ def test_submit(spy):
     assert spy.calls == [((7,), {})]
 
 
-def test_flush_notify(spy):
-    spy("_flush_notifications")
-    spy.dispatch(cmd="flush-notify")
-    assert spy.calls == [((), {})]
+def test_flush_notify(monkeypatch, capsys):
+    # Step "report" 이동: cli._flush_notifications → notify.report.flush
+    calls = []
+    monkeypatch.setattr(cli.report, "flush", lambda *a, **k: calls.append((a, k)) or {})
+    cli._dispatch(argparse.Namespace(cmd="flush-notify"))
+    capsys.readouterr()
+    assert calls == [((), {})]
 
 
 def test_revise(spy):

@@ -20,8 +20,8 @@ import sys
 
 from src.autoapply import agent, llm, pipeline, tasks
 from src.autoapply.adapters import REGISTRY
-from src.autoapply.db import connect, now
-from src.autoapply.notify import telegram
+from src.autoapply.db import connect
+from src.autoapply.notify import report, telegram
 from src.autoapply.paths import describe
 
 
@@ -417,7 +417,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.cmd == "cycle-apply":
         _out(_cycle_apply(args.limit, defer=args.defer))
     elif args.cmd == "flush-notify":
-        _out(_flush_notifications())
+        _out(report.flush())
     elif args.cmd == "night-cycle":
         _out(_night_cycle(args.target, defer=args.defer))
     elif args.cmd == "submit":
@@ -478,7 +478,7 @@ def _night_cycle(target: int, *, defer: bool = False) -> dict:
         attempted += n
         stall = False
         for it in r.get("items", []):
-            # _report_prepared와 같은 기준으로 판정한다. apply 하위의 error를
+            # report.prepared와 같은 기준으로 판정한다. apply 하위의 error를
             # 안 보면(예전 코드가 그랬다) RecipeError 같은 실패가 성공으로
             # 잡혀 목표에 못 미친 채 "목표 도달"로 잘못 멈춘다 — 실측으로 잡음
             # (공고 9, RecipeError인데 최초 코드는 ok=True로 셌다).
@@ -659,7 +659,7 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
             # 이어받는가"를 사람이 읽을 수 있다.
             _note_stage_failure(t["job_id"], r["error"])
         out.append({"job_id": t["job_id"], "company": t["company"], **r})
-        _report_prepared(t, r, defer=defer)
+        report.prepared(t, r, defer=defer)
     # prepared는 "몇 건을 손댔나"이지 "몇 건이 준비됐나"가 아니다 — night-cycle이
     # 이 값으로 대기열 소진만 판정하고, 성공 여부는 items를 보고 따로 센다.
     return {
@@ -678,176 +678,6 @@ def _note_stage_failure(job_id: int, error: str) -> None:
         assemble.note_failure(job_id, error)
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).debug("단계 실패 기록 실패(무시): %s", e)
-
-
-def _queue_notification(
-    conn, *, job_id: int | None, caption: str, photo_path: str | None, buttons: list | None
-) -> None:
-    """지금 보내지 않고 쌓아둔다. `flush-notify`가 나중에 순서대로 보낸다."""
-    conn.execute(
-        "INSERT INTO pending_notifications (job_id, caption, photo_path, buttons, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (job_id, caption, photo_path, json.dumps(buttons) if buttons else None, now()),
-    )
-    conn.commit()
-
-
-def _flush_notifications() -> dict:
-    """쌓인 지원 준비 알림을 순서대로 보낸다. 새벽 루프가 만든 것을 아침에 한 번에 본다.
-
-    사진이 없으면 텍스트로만 보낸다 — `send_photo`가 실패(파일 삭제 등)해도
-    캡션은 반드시 도착해야 무엇이 있었는지 안다.
-    """
-    from src.autoapply.notify import telegram
-
-    conn = connect()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM pending_notifications WHERE sent_at IS NULL ORDER BY id"
-        ).fetchall()
-        sent = 0
-        for r in rows:
-            buttons = json.loads(r["buttons"]) if r["buttons"] else None
-            ok = bool(
-                r["photo_path"]
-                and telegram.send_photo(conn, r["photo_path"], r["caption"], buttons)
-            )
-            if not ok:
-                # 버튼을 떨어뜨리면 안 된다. 승인 요청이 새벽에 쌓였다가
-                # 아침에 **누를 것 없이** 도착한다 — 사진이 없는 알림(수정 계획
-                # 승인 등)이 정확히 그 경우다.
-                if buttons:
-                    telegram.notify_with_buttons(conn, r["caption"], buttons)
-                else:
-                    telegram.notify(conn, r["caption"])
-            conn.execute(
-                "UPDATE pending_notifications SET sent_at=? WHERE id=?", (now(), r["id"])
-            )
-            sent += 1
-        conn.commit()
-        if sent:
-            telegram.notify(conn, f"🌙 새벽 사이에 {sent}건 준비됐습니다 — 위에서부터 검토해주세요.")
-        return {"sent": sent}
-    finally:
-        conn.close()
-
-
-def _report_prepared(target: dict, result: dict, *, defer: bool = False) -> None:
-    """준비 결과를 폰으로 보낸다(또는 defer=True면 나중에 보낼 큐에 쌓는다).
-
-    성공이면 **스크린샷**, 실패면 이유. 실패가 로그에만 남으면 아침에 로그를
-    뒤져야 안다 — 실제로 06시 사이클이 클릭 타임아웃으로 통째로 실패했는데
-    그렇게 발견했다. 무인 운영에서 "아무 일도 안 일어남"과 "망가져서 못 함"은
-    겉보기에 같다.
-    """
-    from src.autoapply.db import connect as _c
-    from src.autoapply.notify import telegram
-
-    conn = _c()
-    try:
-        head = f"{target['fit_score']}점 · {target['company']} — {target['title'][:40]}"
-        apply_res = result.get("apply") or {}
-        err = result.get("error") or apply_res.get("error") or result.get("stopped")
-
-        # 이미 지원한 자리는 **실패가 아니다.** 같은 붉은 글씨로 보내면 사람이
-        # 고쳐야 할 것과 그냥 넘어간 것이 구분되지 않는다. 사진도 버튼도 없이
-        # 한 줄만 보낸다 — 판단할 게 없는 알림이다.
-        if result.get("already_applied"):
-            caption = (
-                f"⏭ <b>이미 지원한 공고</b>\n{head}\n"
-                "<i>예전에 직접 지원하신 자리입니다. 준비하지 않고 대기열에서 뺐습니다.</i>"
-            )
-            if defer:
-                _queue_notification(
-                    conn, job_id=target.get("job_id"), caption=caption,
-                    photo_path=None, buttons=None,
-                )
-            else:
-                telegram.notify(conn, caption)
-            return
-
-        if err:
-            caption = f"❌ <b>지원 준비 실패</b>\n{head}\n<i>{str(err)[:200]}</i>"
-            if defer:
-                _queue_notification(
-                    conn, job_id=target.get("job_id"), caption=caption,
-                    photo_path=None, buttons=None,
-                )
-            else:
-                telegram.notify(conn, caption)
-            return
-
-        # 폰으로 보내는 사진은 실제 원티드 화면이어야 한다. 로컬에서 그려낸
-        # 이미지는 실제로 어떻게 보일지 안 알려준다 — 사람이 판단하는 건
-        # "이게 정말 이렇게 나갈까"이지 우리가 그린 문서가 아니다.
-        #
-        # 편집기 화면(resume.shot)을 우선한다 — 새로고침 후(=저장 확인 후)
-        # 찍은 것이라 실제로 저장된 내용이 보인다. 그게 없으면(스크린샷 실패
-        # 등) 지원 폼 화면(apply.evidence)으로 대신한다 — 그것도 실제 화면이다.
-        shot = (result.get("resume") or {}).get("shot") or apply_res.get("evidence")
-
-        # 폰으로 보내기 전에 화면을 한 번 읽는다. 사람이 사진을 보고 판단하는
-        # 것과 같은 층위를 기계가 먼저 훑어, 명백한 문제는 캡션에 적어 보낸다.
-        verdict = ""
-        if shot:
-            from src.autoapply import vision
-
-            # 무엇을 보라고 할지가 중요하다. 전체 페이지 스크린샷에서 우측
-            # 지원 패널은 작게 잡히므로, 개별 입력값까지 확인하라고 하면
-            # "안 보인다"는 오탐이 난다. 사람이 사진으로 판단할 수 있는 수준 —
-            # 제출 버튼이 눌릴 상태인가, 이력서가 골라졌나 — 만 묻는다.
-            v = vision.verify(
-                shot,
-                "이력서 문서: 이름·간단 소개·경력·학력·스킬이 채워져 있고, "
-                "문장이 중간에 끊기거나 빈 섹션이 없어야 한다.",
-                context="지원에 제출될 이력서 문서",
-                job_id=target.get("job_id"),
-            )
-            if v["ok"] is False and v["issues"]:
-                verdict = "\n⚠️ " + "\n⚠️ ".join(i.lstrip("- ")[:70] for i in v["issues"][:3])
-            elif v["ok"]:
-                verdict = "\n✅ 화면 점검 이상 없음"
-
-        from src.autoapply import assemble as _asm
-
-        reg = _asm.registration(target["job_id"], conn)
-        links = []
-        if reg.get("resume_url"):
-            links.append(f'📝 <a href="{reg["resume_url"]}">이력서 보기</a>')
-        if target.get("url"):
-            links.append(f'🔗 <a href="{target["url"]}">공고 보기</a>')
-
-        # 이력서 본문으로는 못 하는 요구(성적증명서 첨부, 포트폴리오 파일 별도
-        # 업로드, 이메일 송부 등)는 여기서만 알린다. 본문에 적으면 하지 않은 일을
-        # 했다고 쓰는 것이 되고, 승인 화면 밖에서는 사람이 볼 자리가 없다.
-        caption = (
-            f"📄 <b>지원 준비됨</b>\n{head}{verdict}"
-            + _asm.review_block(_asm.review_notes(target["job_id"], conn))
-            + _asm.todo_block(_asm.manual_todos(target["job_id"], conn))
-            + "\n\n"
-            + ("  ·  ".join(links) + "\n\n" if links else "")
-            + "<i>이력서는 이미 만들어져 있습니다. 승인하면 그대로 제출합니다.</i>"
-        )
-        # 세 갈래다. '건너뛰기'만 있던 때는 같은 공고가 다음 사이클에 또 올라와
-        # 같은 판단을 반복하게 했다. 거절에도 종류가 있다 —
-        #   폐기   이 자리는 아니다. 다시 올리지 마라
-        #   수정   자리는 맞는데 내용이 아니다. 고쳐서 다시 가져와라
-        buttons = [
-            [{"text": "✅ 승인 (제출)", "callback_data": f"submit:{target['job_id']}"}],
-            [
-                {"text": "🗑 폐기", "callback_data": f"drop:{target['job_id']}"},
-                {"text": "✏️ 수정요청", "callback_data": f"revise:{target['job_id']}"},
-            ],
-        ]
-        if defer:
-            _queue_notification(
-                conn, job_id=target.get("job_id"), caption=caption, photo_path=shot,
-                buttons=buttons,
-            )
-        elif not (shot and telegram.send_photo(conn, shot, caption, buttons)):
-            telegram.notify(conn, caption)
-    finally:
-        conn.close()
 
 
 def _submit(job_id: int) -> dict:
@@ -929,16 +759,16 @@ def _revise(job_id: int, feedback: str) -> dict:
     # 나가므로 사람이 바로 알아보고 파일에서 고칠 수 있어야 한다.
     try:
         entry = assemble.append_revision(job_id, feedback)
-        _tell(f"📒 <b>원장 기록</b>\n<code>{html.escape(entry)}</code>\n"
-              f"<i>틀렸으면 {assemble.REVISION_LOG.name} 에서 그 줄을 고치세요.</i>")
+        report.tell(f"📒 <b>원장 기록</b>\n<code>{html.escape(entry)}</code>\n"
+                    f"<i>틀렸으면 {assemble.REVISION_LOG.name} 에서 그 줄을 고치세요.</i>")
     except Exception as e:  # noqa: BLE001
         log.warning("원장 기록 실패(재작성은 계속): %s", e)
 
     built = assemble.build_editor_json(job_id, feedback=feedback)
     if not built["ok"]:
-        _tell(f"❌ <b>재작성 중단</b> — 공고 {job_id}\n"
-              f"필수요건 미충족 {built['required_gaps']}건\n"
-              "<i>수정 요청이 사실 저장소에 없는 내용을 요구했을 수 있습니다.</i>")
+        report.tell(f"❌ <b>재작성 중단</b> — 공고 {job_id}\n"
+                    f"필수요건 미충족 {built['required_gaps']}건\n"
+                    "<i>수정 요청이 사실 저장소에 없는 내용을 요구했을 수 있습니다.</i>")
         return {"stopped": "재작성 후에도 필수요건 미충족", "gaps": built["required_gaps"]}
 
     # **이어받지 않는다.** 재작성은 "이번엔 다르게 써 달라"는 요청이므로,
@@ -947,7 +777,7 @@ def _revise(job_id: int, feedback: str) -> dict:
     result = _autoapply(job_id, resume_url=None, live=False, reuse=False)
     target = _job(job_id)
     target["fit_score"] = target.get("fit_score") or 0
-    _report_prepared(
+    report.prepared(
         {**target, "job_id": job_id, "fit_score": _fit_score(job_id)},
         result,
     )
@@ -965,11 +795,11 @@ def _guide(instruction: str, *, revert: bool, clear_session: bool = False) -> di
 
     if clear_session:
         result = guide.clear_session()
-        _tell(_guide_message(result, revert=False, clear_session=True))
+        report.tell(_guide_message(result, revert=False, clear_session=True))
         return result
 
     result = guide.revert() if revert else guide.edit(instruction)
-    _tell(_guide_message(result, revert=revert, clear_session=False))
+    report.tell(_guide_message(result, revert=revert, clear_session=False))
     return result
 
 
@@ -1022,19 +852,6 @@ def _fit_score(job_id: int) -> int:
             "SELECT fit_score FROM screening WHERE job_id=?", (job_id,)
         ).fetchone()
         return int(row["fit_score"]) if row and row["fit_score"] is not None else 0
-    finally:
-        conn.close()
-
-
-def _tell(text: str) -> None:
-    """폰으로 한 줄 보낸다. 실패해도 흐름을 멈추지 않는다."""
-    from src.autoapply.notify import telegram
-
-    conn = connect()
-    try:
-        telegram.notify(conn, text)
-    except Exception as e:  # noqa: BLE001
-        logging.getLogger(__name__).warning("알림 실패: %s", e)
     finally:
         conn.close()
 
@@ -1436,8 +1253,8 @@ if __name__ == "__main__":
         raise
     except tasks.Cancelled as e:  # 사람이 멈춘 것 — 고장이 아니다
         try:
-            _tell(f"⏹ <b>중단</b> — <code>{html.escape(' '.join(sys.argv[1:])[:100])}</code>\n"
-                  f"<i>{html.escape(str(e)[:200])}</i>")
+            report.tell(f"⏹ <b>중단</b> — <code>{html.escape(' '.join(sys.argv[1:])[:100])}</code>\n"
+                        f"<i>{html.escape(str(e)[:200])}</i>")
         except Exception:  # noqa: BLE001
             pass
         print(json.dumps({"cancelled": str(e)}, ensure_ascii=False, indent=2))
@@ -1449,7 +1266,7 @@ if __name__ == "__main__":
             raise
         cmd = " ".join(sys.argv[1:])[:150]
         try:
-            _tell(
+            report.tell(
                 f"🔒 <b>브라우저가 사용 중</b> — <code>{html.escape(cmd)}</code>는 시작하지 못했습니다.\n"
                 f"지금 도는 작업: <i>{html.escape(str(e))}</i>\n\n"
                 "끝나면 다시 눌러주세요. 지금 멈추려면 <code>/stop</code>."
@@ -1477,7 +1294,7 @@ if __name__ == "__main__":
             # 기록조차 실패하면 최소한 폰에는 남긴다. 여기서 또 터지면
             # 원래 고장이 무엇이었는지가 통째로 사라진다.
             try:
-                _tell(
+                report.tell(
                     f"❌ <b>cli.py 처리 안 된 오류</b>\n<code>{html.escape(cmd)}</code>\n"
                     f"<i>{type(e).__name__}: {str(e)[:300]}</i>"
                 )
