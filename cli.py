@@ -822,6 +822,7 @@ def _report_prepared(target: dict, result: dict, *, defer: bool = False) -> None
         # 했다고 쓰는 것이 되고, 승인 화면 밖에서는 사람이 볼 자리가 없다.
         caption = (
             f"📄 <b>지원 준비됨</b>\n{head}{verdict}"
+            + _asm.review_block(_asm.review_notes(target["job_id"], conn))
             + _asm.todo_block(_asm.manual_todos(target["job_id"], conn))
             + "\n\n"
             + ("  ·  ".join(links) + "\n\n" if links else "")

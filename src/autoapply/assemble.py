@@ -370,6 +370,7 @@ def review(job: dict[str, Any], guide: str, resume: str) -> dict[str, Any]:
     prompt = f"""아래 이력서가 채용공고와 작성 가이드를 지켰는지 검수하라.
 
 **치명적 문제만** 지적한다. 문체 취향·사소한 표현은 지적하지 않는다.
+**`skills` 배열은 검수 대상이 아니다** — 코드가 따로 대조한다. 지적하지 마라.
 치명적 문제란 다음뿐이다:
 1. 가이드 §3 사실 저장소에 없는 사실이 들어감 (날조)
 2. 가이드 §5 확정값 표와 다른 수치·기간 표기
@@ -396,6 +397,193 @@ def review(job: dict[str, Any], guide: str, resume: str) -> dict[str, Any]:
     ok = out.upper().startswith("OK")
     issues = [] if ok else [ln.strip() for ln in out.splitlines() if ln.strip().startswith("-")]
     return {"ok": ok, "issues": issues, "raw": out}
+
+
+# ── 편집기 JSON 검수 ──────────────────────────────────────────────────────
+#
+# `review()`는 마크다운 경로(build)에만 붙어 있었다. **실제 제출물을 만드는 경로는
+# `build_editor_json`인데 거기엔 보는 눈이 없었다** — 실측으로 확인했다: 저장소
+# 통틀어 `phase='review'` 2회, `phase='to_editor_json'` 36회.
+#
+# 그 사각지대에서 실제로 나간 것들(2026-08-17 벤치마크):
+#   · 사실 저장소에 없는 `Spring Boot`가 스킬로 등록됨 (공고 121)
+#   · 써본 적 없는 제품의 사용 후기가 본문에 들어감 (공고 119, 그 공고는
+#     "허위사실이 있는 경우 합격 취소"를 명시하고 있었다)
+#   · 경력 도메인을 `위탁판매` → `부동산 위탁판매`로 늘림 (공고 4110)
+#
+# 셋 다 형식 문제가 아니라 **가이드 전문과 대조해야 보이는 문제**다. 그래서 이
+# 검수만 모델을 따로 둔다(`llm.editor_review_model`).
+
+# 검수가 붙이는 등급. 자동지원을 막는 것은 `날조` 하나뿐이다 —
+# 나머지로도 막으면 문체 지적 하나에 파이프라인이 선다.
+FABRICATION = "날조"
+REVIEW_LEVELS = (FABRICATION, "불일치", "누락", "형식")
+
+# 등급표는 `- [날조] …` 로 달라고 했지만 모델은 마크다운을 얹어서 온다:
+# 실측 — Sonnet 5는 `- \`[날조]\` …` 처럼 백틱으로 감쌌다. 그걸 못 읽으면 전부
+# '형식'으로 떨어지고, **자동지원을 막는 유일한 등급인 '날조'가 통째로 사라진다.**
+# 첫 A/B에서 이 파싱 하나 때문에 Sonnet이 못 잡은 것으로 집계됐다(실제로는 잡았다).
+LEVEL_TAG = re.compile(
+    r"^[-*\s]*[`*_\s]*\[(?P<level>" + "|".join(REVIEW_LEVELS) + r")\][`*_\s]*(?P<text>.*)$"
+)
+
+
+def unknown_skills(data: dict[str, Any], guide: str) -> list[str]:
+    """가이드에 없는 스킬을 **코드로** 골라낸다. LLM에게 물을 일이 아니다.
+
+    §3.5는 고정된 단어 목록이라 문자열 대조로 끝난다. 그런데 실측(2026-08-17
+    검수 A/B)에서 두 모델 다 여기서 헛발질했다:
+
+        Haiku   §3.5에 **있는** `Express`를 "없다"며 날조로 지목
+        Sonnet  §3.5에 **있는** `Docker`·`AWS`를 "본문에 근거 문장이 없다"며 날조로 지목
+
+    반대 방향도 났다 — 정작 없는 `Spring Boot`는 두 모델 다 잡았지만, 같은 답에
+    오탐 5건이 섞여 오면 그 목록은 못 쓴다. 대조는 코드가 하고, LLM에게는 대조로는
+    안 되는 것(산문 속 경험 날조)만 맡긴다.
+
+    비교는 가이드 **전문**에 그 단어가 나오는지로 본다. §3.5 목록만 보면
+    `Tesseract OCR`처럼 경력 설명에만 있는 기술이 전부 날조로 잡힌다.
+    """
+    low = guide.lower()
+    return [
+        sk for sk in (data.get("skills") or [])
+        if isinstance(sk, str) and sk.strip() and sk.strip().lower() not in low
+    ]
+
+
+def review_editor(
+    job: dict[str, Any], guide: str, data: dict[str, Any], *, model: str | None = None
+) -> dict[str, Any]:
+    """조립된 편집기 JSON을 사실 저장소와 대조한다.
+
+    마크다운이 아니라 JSON을 그대로 보여준다. 사람이 읽을 문서로 바꿔서 보여주면
+    어느 필드에 문제가 있는지가 흐려지고, 그러면 지적을 받아도 어디를 고칠지 모른다.
+    """
+    cfg = effective_config().get("llm", {})
+    body = json.dumps(
+        {k: v for k, v in data.items() if not k.startswith("_") and k != "gaps"},
+        ensure_ascii=False, indent=2,
+    )
+    prompt = f"""아래 [이력서 JSON]이 [작성 가이드]의 사실 저장소를 벗어나지 않았는지 검수하라.
+
+**치명적 문제만** 지적한다. 문체 취향·사소한 표현은 지적하지 않는다.
+**`skills` 배열은 검수 대상이 아니다** — 코드가 따로 대조한다. 지적하지 마라.
+등급을 반드시 붙인다:
+
+- `[날조]` 가이드 §3 사실 저장소에 **없는** 수치·기술·경험·도메인이 들어갔다.
+  · 경력의 도메인·범위를 공고에 맞춰 늘렸다 (예: `위탁판매` → `부동산 위탁판매`)
+  · **직접 겪어야 쓸 수 있는 서술을 지어냈다** — 제품 사용 후기, 서비스 개선 제안,
+    방문기 등. 공고가 요구했더라도 §3에 그 경험이 없으면 지어낸 것이다
+  · 개인 프로젝트를 회사 경력의 성과로 넣었다
+- `[불일치]` 가이드 §5 확정값 표와 다른 수치·기간
+- `[누락]` 공고의 **필수요건**에 대응하는 경험이 §3에 있는데 이력서에서 빠졌다
+- `[형식]` 사고 과정·작업 노트가 본문에 남았다, `· 사용기술:` 줄 누락 등
+
+판단 기준은 하나다: **이 문장을 뒷받침하는 근거가 [작성 가이드] 안에 있는가?**
+없으면 [날조]다. "상식적이니 괜찮다"는 이유로 넘어가지 마라 — 이 이력서는 사람 이름으로
+실제 제출된다.
+
+출력 형식 — 다른 말은 하지 마라:
+- 문제가 없으면 정확히 `OK` 한 줄만.
+- 있으면 문제당 한 줄씩, `- [등급] 어느 필드의 무엇이 왜 문제인지` 형태로.
+
+# 작성 가이드
+{guide}
+
+# 채용공고
+{_jd_block(job)}
+
+# 이력서 JSON
+{body}"""
+
+    out = llm.ask(
+        prompt,
+        model=model or cfg.get("editor_review_model", "claude-sonnet-5"),
+        job_id=job.get("id"), phase="review_editor",
+    ).strip()
+
+    issues: list[dict[str, str]] = []
+    if not out.upper().startswith("OK"):
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if not ln.startswith("-"):
+                continue
+            m = LEVEL_TAG.match(ln)
+            if m:
+                level, text = m.group("level"), m.group("text").strip()
+            else:
+                level, text = "형식", ln.lstrip("- ").strip()
+            issues.append({"level": level, "text": text})
+
+    fabricated = [i for i in issues if i["level"] == FABRICATION]
+    return {"ok": not issues, "issues": issues, "fabricated": fabricated, "raw": out}
+
+
+def _drop_unknown_skills(data: dict[str, Any], guide: str) -> list[str]:
+    """가이드에 없는 스킬을 지우고, 지운 것을 돌려준다."""
+    bad = unknown_skills(data, guide)
+    if not bad:
+        return []
+    log.warning("가이드에 없는 스킬 %d개 제거: %s", len(bad), bad)
+    data["skills"] = [sk for sk in (data.get("skills") or []) if sk not in bad]
+    return bad
+
+
+def _review_and_fix(
+    data: dict[str, Any], job: dict[str, Any], guide: str, job_id: int, feedback: str
+) -> list[str]:
+    """산문을 검수하고, 날조가 있으면 **한 번만** 다시 쓴다. 남은 지적을 돌려준다.
+
+    한 번인 이유는 값이다 — 재작성은 조립 전체를 다시 받는 것이라 건당 30초·
+    출력 2,700토큰이다. 두 번 돌려도 세 번째가 필요해지는 종류의 문제(근거가 정말
+    없는 요건)는 재작성으로 안 풀린다. 그건 사람이 볼 일이다.
+
+    검수가 실패해도(한도·네트워크) 조립을 막지 않는다. 검수는 있으면 좋은 눈이지
+    제출물을 만드는 단계가 아니다 — 여기서 예외를 올리면 이력서 한 건이 통째로 날아간다.
+    """
+    try:
+        verdict = review_editor(job, guide, data)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("검수 실패(무시하고 진행): %s", exc)
+        return []
+
+    if not verdict["fabricated"]:
+        if verdict["issues"]:
+            log.info("검수 지적 %d건 — 날조는 없어 재작성하지 않는다", len(verdict["issues"]))
+        return []
+
+    log.info("검수가 날조 %d건 지적 — 1회 재작성", len(verdict["fabricated"]))
+    tasks.check("검수 후 재작성 전")
+    hint = "\n".join(f"- {i['text']}" for i in verdict["fabricated"])
+    try:
+        raw = llm.ask(
+            _editor_prompt(job, guide, job_id, feedback, review_notes=hint),
+            job_id=job_id, phase="to_editor_json_fix",
+        )
+        fixed = _parse_json(raw)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("재작성 실패 — 첫 조립을 유지하고 지적만 남긴다: %s", exc)
+        return [i["text"] for i in verdict["fabricated"]]
+
+    _strip_reasoning(fixed)
+    _drop_manual_fields(fixed)
+    _strip_unknown_links(fixed, guide)
+    _ensure_summary_length(fixed, job, guide)
+    _strip_reasoning(fixed)
+    _strip_unknown_links(fixed, guide)
+    _normalize_todos(fixed)
+    _drop_unknown_skills(fixed, guide)
+    data.clear()
+    data.update(fixed)
+
+    try:
+        again = review_editor(job, guide, data)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("재검수 실패(무시): %s", exc)
+        return []
+    if again["fabricated"]:
+        log.warning("재작성 뒤에도 날조 지적 %d건 — 사람에게 넘긴다", len(again["fabricated"]))
+    return [i["text"] for i in again["fabricated"]]
 
 
 def build(
@@ -483,7 +671,7 @@ def build(
 
 EDITOR_SCHEMA = """{
   "headline": "한 줄 타이틀 (공고에 맞춰 매번 다시 씀)",
-  "summary": "간단 소개. 가이드 §2-1의 네 덩어리를 그 순서대로 넣는다. 덩어리 사이에는 빈 줄 하나.\n  ① 첫 줄: 한 문장 요약 (무엇을 하는 개발자인가). 이 공고의 1순위 역량이 이 줄에 들어간다\n  ② '· ' 로 시작하는 핵심역량 불릿 4개. 각 한 줄, 태도가 아니라 역량/경험 단위\n  ③ 가이드 §8의 [대표 프로젝트] 블록 100~300자. '[대표 프로젝트] 이름 — 한 줄 소개' + '· ' 불릿 1~2개(성과 수치 필수) + 마지막 줄에 URL 하나. URL은 가이드 §3.4 표의 값을 그대로 옮긴다 — 조합해 만들지 않는다. 비공개 프로젝트는 링크가 없으므로 이 블록에 쓰지 않는다\n  ④ 가이드 §9 — 공고가 자기소개·지원동기·산출물 링크 등을 따로 요구했을 때만. 요구가 없으면 이 덩어리는 통째로 없다\n  전체 **550~850자**. 원티드가 400자 미만이면 이력서 완성도를 깎으므로 반드시 넘긴다. 줄바꿈(\\n)을 실제로 넣는다 — 한 문단으로 붙이지 않는다",
+  "summary": "간단 소개. 가이드 §2-1의 네 덩어리를 그 순서대로 넣는다. 덩어리 사이에는 빈 줄 하나.\n  ① 첫 줄: 한 문장 요약 (무엇을 하는 개발자인가). 이 공고의 1순위 역량이 이 줄에 들어간다\n  ② '· ' 로 시작하는 핵심역량 불릿 4개. 각 한 줄, 태도가 아니라 역량/경험 단위\n  ③ 가이드 §8의 [대표 프로젝트] 블록 — **공고에 잘 맞는 개인 프로젝트가 있을 때만.** 없으면 이 덩어리는 통째로 없다. 붙인다면 100~300자. '[대표 프로젝트] 이름 — 한 줄 소개' + '· ' 불릿 1~2개(성과 수치 필수) + 마지막 줄에 URL 하나. URL은 가이드 §3.4 표의 값을 그대로 옮긴다 — 조합해 만들지 않는다. 비공개 프로젝트는 링크가 없으므로 이 블록에 쓰지 않는다\n  ④ 가이드 §9 — 공고가 자기소개·지원동기·산출물 링크 등을 따로 요구했을 때만. 요구가 없으면 이 덩어리는 통째로 없다\n  전체 **550~850자**. 원티드가 400자 미만이면 이력서 완성도를 깎으므로 반드시 넘긴다. 줄바꿈(\\n)을 실제로 넣는다 — 한 문단으로 붙이지 않는다",
   "experiences": [
     {"company": "회사명", "job_role": "직무", "business_title": "직책",
      "start": "YYYY.MM", "end": "YYYY.MM",
@@ -494,6 +682,7 @@ EDITOR_SCHEMA = """{
      ]}
   ],
   "_note_achievement_period": "achievements의 start/end는 그 프로젝트를 수행한 기간이며 반드시 소속 경력의 재직기간 안에 들어가야 한다. 가이드 §3에 기간이 적힌 항목은 그 값을 그대로 쓴다.",
+  "_note_experience_scope": "experiences에는 **그 회사에서 한 일만** 쓴다. 개인 프로젝트를 성과로 넣거나, 회사에서 한 일의 근거·산출물로 개인 저장소를 가리키지 않는다 — 회사 코드가 아니다. 개인 프로젝트는 summary의 [대표 프로젝트] 블록에서만 다룬다.",
   "educations": [
     {"school": "학교명", "major": "전공 및 학위", "start": "YYYY.MM", "end": "YYYY.MM",
      "detail": "이수 과목 또는 연구 내용"}
@@ -503,7 +692,7 @@ EDITOR_SCHEMA = """{
   "skills": ["스킬", "나열"],
   "links": [{"name": "GitHub", "url": "https://..."}],
   "gaps": [{"level": "필수|우대", "text": "공고 요건 중 근거가 없는 항목"}],
-  "manual_todos": ["공고가 요구하는데 이력서 본문으로는 충족할 수 없는 것만. 첨부·업로드·별도 송부·사전 응시처럼 사람이 직접 해야 하는 것이다(성적증명서·졸업증명서 첨부, 자격증 사본, 이메일 별도 송부, 회사 자체 양식 작성 등). 각 항목은 60자 이내 한 줄. 글로 쓸 수 있는 요구는 여기가 아니라 summary ④블록에 넣는다. **포트폴리오 첨부는 넣지 않는다** — 파이프라인이 공고에 맞는 파일을 골라 지원 폼에서 자동으로 첨부한다. 없으면 빈 배열"]
+  "manual_todos": ["공고가 요구하는데 이력서 본문으로는 충족할 수 없는 것만. 첨부·업로드·별도 송부·사전 응시처럼 사람이 직접 해야 하는 것이다(성적증명서·졸업증명서 첨부, 자격증 사본, 이메일 별도 송부, 회사 자체 양식 작성 등). 각 항목은 60자 이내 한 줄. 글로 쓸 수 있는 요구는 여기가 아니라 summary ④블록에 넣되, **§3 사실 저장소에 없는 경험을 요구하는 서술(제품 사용 후기·개선 제안·방문기 등)은 짧아도 여기에 넣는다** — 지어내면 허위기재다. **포트폴리오 첨부는 넣지 않는다** — 파이프라인이 공고에 맞는 파일을 골라 지원 폼에서 자동으로 첨부한다. 없으면 빈 배열"]
 }"""
 
 
@@ -562,32 +751,26 @@ def _revision_block(feedback: str) -> str:
     )
 
 
-def build_editor_json(
-    job_id: int,
-    *,
-    conn: sqlite3.Connection | None = None,
-    save: bool = True,
-    max_age_hours: float = 72,
-    feedback: str = "",
-) -> dict[str, Any]:
-    """원티드 편집기 폼에 그대로 넣을 수 있는 형태로 조립한다.
+def _editor_prompt(
+    job: dict[str, Any], guide: str, job_id: int, feedback: str = "",
+    review_notes: str = "",
+) -> str:
+    """편집기 JSON을 만드는 프롬프트. 검수 후 재작성이 **같은 프롬프트**를 다시 쓴다.
 
-    max_age_hours 안에 만든 결과가 있으면 재사용한다. 사이클이 반복될 때마다
-    같은 공고에 LLM을 다시 부르면 시간(건당 40초)과 비용이 그대로 곱해진다.
-    공고 본문과 이력서 가이드는 하루 사이에 잘 바뀌지 않는다.
+    재작성 때 프롬프트를 새로 짜면 첫 조립과 다른 규칙으로 쓰이게 되고, 그러면
+    검수가 지적한 것만 고쳐졌는지 알 수 없다.
     """
-    # 사람이 고쳐 달라고 했으면 캐시를 쓰면 안 된다. 캐시는 "같은 입력이면
-    # 같은 결과"라는 전제 위에 서 있는데, 피드백은 입력이 바뀐 것이다.
-    if not feedback:
-        cached = _load_cached(job_id, max_age_hours, conn)
-        if cached is not None:
-            log.info("공고 %s — 최근 조립 결과 재사용 (LLM 호출 0회)", job_id)
-            return cached
-
-    guide = load_guide()
-    job = load_job(job_id, conn)
-
-    prompt = f"""아래 [작성 가이드]를 따라 [채용공고]에 맞춘 이력서를 **JSON으로만** 출력하라.
+    notes = ""
+    if review_notes:
+        notes = (
+            "\n# 검수 지적 — 이것만 고친다\n"
+            "아래는 이 이력서를 사실 저장소와 대조한 검수 결과다. **지적된 곳만** 고치고\n"
+            "나머지는 그대로 둔다. 지적을 피하려고 다른 문장을 덜어내지 마라.\n\n"
+            "특히 근거가 없다고 지적된 서술은 **표현을 다듬는 것이 아니라 빼는 것**이다.\n"
+            "그 요건에 대응할 근거가 정말 없으면 `gaps`에 넣고, 사람이 해야 하는 일이면\n"
+            "`manual_todos`로 옮긴다.\n\n" + review_notes + "\n"
+        )
+    return f"""아래 [작성 가이드]를 따라 [채용공고]에 맞춘 이력서를 **JSON으로만** 출력하라.
 
 가이드의 §1 처리 순서, §3 사실 저장소, §4 문장 규칙, §5 일관성 체크리스트,
 §7 직무별 강조 우선순위를 적용한다.
@@ -597,7 +780,7 @@ def build_editor_json(
 
 **순서는 직무명이 아니라 [채용공고]의 자격요건이 정한다(§7-0).** 먼저 자격요건·
 우대사항·주요업무·기술스택에 나온 기술/역량을 전부 나열하고, 각각에 §3 사실 저장소의
-근거를 붙인 뒤, **필수요건을 많이 덮는 경험부터** 앞에 놓는다. §7-3 기본값 표는 공고에
+근거를 붙인 뒤, **필수요건을 많이 덮는 경험부터** 앞에 놓는다. §7-4 기본값 표는 공고에
 요건이 거의 안 적혀 있을 때만 본다.
 
 직무명이 '백엔드'여도 자격요건에 AWS·Docker·CI/CD가 있으면 그건 백엔드 기본값 행이
@@ -609,14 +792,20 @@ def build_editor_json(
 요건이 셋 이상 갈리면(백엔드+인프라+AI) 필수요건을 가장 많이 덮는 것 하나를 축으로
 잡고 나머지는 그 경험의 불릿 안에 녹인다. 세 축을 나란히 세우지 않는다.
 
-**간단 소개(summary)에는 대표 프로젝트 링크 블록을 반드시 넣는다(§8).** 링크 칸은
-공고와 무관하게 고정돼 있어, 이 공고에 맞는 저장소를 보여줄 수 있는 자리가 여기뿐이다.
-URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝트는 링크가 없으므로 내용으로만
-쓰고, 링크는 공개 저장소 중 다음으로 맞는 것을 고른다.
+이 공고와 **매우 무관한 경험은 뺀다.** 애매하면 넣는다.
+
+**대표 프로젝트 블록(§8)은 공고에 잘 맞는 개인 프로젝트가 있을 때만 넣는다.** 지원 시
+포트폴리오 PDF가 함께 첨부되므로 개인 프로젝트는 거기서 이미 보인다 — 억지로 갖다 붙이면
+공고와 상관없는 저장소가 간단 소개 한복판을 차지한다. 애매하면 넣지 않는다.
+넣는다면 URL은 §3.4 표의 값을 **글자 그대로** 옮기고, 비공개 프로젝트는 링크가 없으므로
+이 블록에 쓰지 않는다.
 
 **공고가 이 가이드에 없는 제출 요구를 했으면 §9대로 가른다.** 자기소개·지원동기·
 산출물 링크·블로그처럼 글로 쓸 수 있는 것은 summary ④블록에 넣고, 증명서 첨부·
-별도 송부·사전과제처럼 사람이 해야 하는 것은 `manual_todos`에 적는다. 첨부하지 않은 것을
+별도 송부·사전과제처럼 사람이 해야 하는 것은 `manual_todos`에 적는다.
+**가르는 기준은 분량이 아니라 근거다**: 그 문장을 쓰려면 §3에 없는 경험이 필요하면
+(제품 사용 후기, 서비스 개선 제안, 방문기 등) 짧아도 `manual_todos`다 — 써본 적 없는
+제품의 후기를 지어내는 것은 허위기재이고, 실제로 그렇게 나갈 뻔했다. 첨부하지 않은 것을
 "첨부하였습니다"라고 쓰지 않는다. **포트폴리오 첨부는 `manual_todos`에 넣지 않는다** —
 파이프라인이 공고에 맞는 포트폴리오를 골라 지원 폼에서 자동으로 첨부한다.
 
@@ -645,7 +834,35 @@ URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝�
 
 # 채용공고
 {_jd_block(job)}
-{load_revision_log(job_id)}{_track_block(job)}{_revision_block(feedback)}"""
+{load_revision_log(job_id)}{_track_block(job)}{_revision_block(feedback)}{notes}"""
+
+
+def build_editor_json(
+    job_id: int,
+    *,
+    conn: sqlite3.Connection | None = None,
+    save: bool = True,
+    max_age_hours: float = 72,
+    feedback: str = "",
+) -> dict[str, Any]:
+    """원티드 편집기 폼에 그대로 넣을 수 있는 형태로 조립한다.
+
+    max_age_hours 안에 만든 결과가 있으면 재사용한다. 사이클이 반복될 때마다
+    같은 공고에 LLM을 다시 부르면 시간(건당 40초)과 비용이 그대로 곱해진다.
+    공고 본문과 이력서 가이드는 하루 사이에 잘 바뀌지 않는다.
+    """
+    # 사람이 고쳐 달라고 했으면 캐시를 쓰면 안 된다. 캐시는 "같은 입력이면
+    # 같은 결과"라는 전제 위에 서 있는데, 피드백은 입력이 바뀐 것이다.
+    if not feedback:
+        cached = _load_cached(job_id, max_age_hours, conn)
+        if cached is not None:
+            log.info("공고 %s — 최근 조립 결과 재사용 (LLM 호출 0회)", job_id)
+            return cached
+
+    guide = load_guide()
+    job = load_job(job_id, conn)
+
+    prompt = _editor_prompt(job, guide, job_id, feedback)
 
     raw = llm.ask(prompt, job_id=job_id, phase="to_editor_json")
     data = _parse_json(raw)
@@ -663,6 +880,21 @@ URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝�
     _strip_reasoning(data)  # 보강 응답에도 섞일 수 있다
     _strip_unknown_links(data, guide)  # 보강도 지어낼 수 있다. 저장 전에 한 번 더
     todos = _normalize_todos(data)
+
+    # ── 스킬: 코드가 대조하고 코드가 지운다 ──
+    # 오탐이 0이라(실측 4/4) 사람에게 물을 것이 없다. 지적으로 남기지 않고 지운다 —
+    # 원티드 스킬 사전에 없는 단어는 어차피 등록도 안 된다.
+    notes: list[str] = []
+    for sk in _drop_unknown_skills(data, guide):
+        notes.append(f"가이드에 없어 제거한 스킬: {sk}")
+
+    # ── 산문: LLM 검수 1회 + 날조가 남으면 재작성 1회 ──
+    # **차단하지 않는다.** 실측 A/B에서 두 모델 다 4건에 1건씩 잘못된 날조를 달았고
+    # (Haiku는 §5 확정값을, Sonnet은 더 겸손하게 쓴 표현을), 그걸 차단에 쓰면 멀쩡한
+    # 이력서가 선다. 되돌릴 수 없는 지점(제출) 앞에는 이미 사람이 있으므로,
+    # 판단이 갈리는 지적은 그 사람에게 보낸다(승인 캡션의 ⚠️).
+    review_notes = _review_and_fix(data, job, guide, job_id, feedback)
+    notes.extend(review_notes)
 
     gaps = data.get("gaps") or []
     required = [g for g in gaps if g.get("level") == "필수"]
@@ -688,7 +920,7 @@ URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝�
     _save_build(
         job_id, len(required) <= max_gaps, required, gaps, conn,
         track=job.get("track"), headline=data.get("headline"),
-        portfolio_title=portfolio_title, manual_todos=todos,
+        portfolio_title=portfolio_title, manual_todos=todos, review_notes=notes,
     )
 
     return {
@@ -699,6 +931,7 @@ URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝�
         "required_gaps": len(required),
         "gaps": gaps,
         "manual_todos": todos,
+        "review_notes": notes,
         "path": str(path) if path else None,
         "portfolio_title": portfolio_title,
         "data": data,
@@ -730,6 +963,27 @@ SUMMARY_HARD_MAX = 1000
 # 지원동기는 "이 공고의 ...를 하고 싶다"처럼 REASONING 패턴과 겹치는 문장이 정상이다.
 SUMMARY_BLOCK_HEAD = ("[", "·")
 
+# 다만 **가이드를 입에 올리는 순간 예외가 아니다.** 실측(공고 142): 모델이
+#   `[대표 프로젝트] 없이, 링크는 §3.4 표에 없는 조합 링크를 만들 수 없어 …`
+# 라고 써서, `[`로 시작한다는 이유만으로 면제를 받아 간단 소개 맨 앞에 그대로 남았다.
+# 이력서 본문에 `§`나 '가이드'가 나올 일은 없다 — 그건 무조건 사고 과정이다.
+GUIDE_TALK = re.compile(r"§|가이드|사실 저장소|이 공고는[^\n]*근거가 없")
+
+# 모델이 이력서 대신 **자기 작업 노트**를 적을 때 쓰는 표현. 실측 3건(공고 142/266/310):
+#   "595자로 범위 내. 최종 출력."
+#   "…경험을 이 공고 자격요건에 맞춰 구체화한 버전."
+#   "…운영 경험을 불릿에 구체적으로 녹여 작성."
+# REASONING은 "(이 공고)…(구성|매칭|…)" 꼴만 잡아서 이런 문장을 통과시켰다.
+# 공통점은 **글자수·출력·작성 행위 자체를 말한다**는 것이다 — 이력서 문장은 그러지 않는다.
+WORK_NOTE = re.compile(
+    r"\d+\s*자[^\n]{0,12}(범위|이내|내외|맞춤|채움|채웁|맞췄)"
+    r"|최종\s*출력"
+    r"|맞춰\s*(구체화|작성)한?\s*(버전|안)?"
+    r"|불릿에[^\n]{0,12}(녹여|담아)\s*작성"
+    r"|^-{3,}$",
+    re.MULTILINE,
+)
+
 URL_RE = re.compile(r"https?://[^\s)\]>,]+")
 
 
@@ -745,6 +999,10 @@ def _strip_reasoning(data: dict[str, Any]) -> None:
     `[대표 프로젝트]`·`[지원동기]` 블록은 건드리지 않는다. 지원동기는 공고를 근거로
     쓰는 것이 정상이라 REASONING 패턴("이 공고의 …를 …")과 겹치는데, 그걸 판단
     근거로 오인해 지우면 공고가 요구한 항목이 통째로 사라진다.
+
+    **단, 가이드를 입에 올리는 문단은 그 면제를 못 받는다**(`GUIDE_TALK`). 머리표만
+    보고 면제하면 "[대표 프로젝트] 없이, §3.4 표에 없어서…" 같은 자기설명이 그대로
+    통과한다 — 실제로 그렇게 새어 나갔다.
     """
     for key in ("summary",):
         text = data.get(key)
@@ -753,7 +1011,12 @@ def _strip_reasoning(data: dict[str, Any]) -> None:
         blocks = [b for b in text.split("\n\n")]
         kept = [
             b for b in blocks
-            if not (REASONING.search(b) and not b.strip().startswith(SUMMARY_BLOCK_HEAD))
+            if not (
+                GUIDE_TALK.search(b)
+                # 작업 노트는 불릿을 달지 않는다. 불릿 문단은 본문이므로 건드리지 않는다.
+                or (WORK_NOTE.search(b) and not b.lstrip().startswith("·"))
+                or (REASONING.search(b) and not b.strip().startswith(SUMMARY_BLOCK_HEAD))
+            )
         ]
         if len(kept) != len(blocks):
             log.info("%s에서 판단 근거 문단 %d개 제거", key, len(blocks) - len(kept))
@@ -856,37 +1119,29 @@ def _drop_manual_fields(data: dict[str, Any]) -> None:
 
 
 def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str) -> None:
-    """간단 소개가 짧거나 **대표 프로젝트 링크가 없으면** 그 필드만 다시 받는다.
+    """간단 소개가 짧으면 **그 필드만** 다시 받는다.
 
     원티드는 400자 미만이면 이력서 완성도를 깎는다. 그런데 프롬프트로 글자수를
     지시해도 잘 안 지켜진다(실측: 450자를 요구했는데 314자). 지시를 더 세게 쓰는
     대신 코드가 재고 모자라면 다시 받는다 — 이 프로젝트의 다른 검증들과 같은
     방식이다.
 
-    링크도 같은 부류다. §8의 대표 프로젝트 블록은 **링크 칸이 공고마다 바뀌지 않아서**
-    만든 자리라, URL이 빠지면 그 블록은 있으나 마나다. 글자수와 함께 코드가 본다.
-
     전체를 다시 만들지 않는 이유: 출력 토큰에 시간이 선형이라 전체 재생성은
     비싸다. v1이 자소서 한 건에 98초 걸린 원인이 그 통짜 재생성 루프였다.
     """
     summary = (data.get("summary") or "").strip()
-    short = len(summary) < SUMMARY_MIN
-    no_link = not URL_RE.search(summary)
-    if not (short or no_link):
+    if len(summary) >= SUMMARY_MIN:
         return
 
-    why = ", ".join(x for x in ["짧음" if short else "", "대표 프로젝트 링크 없음"
-                                if no_link else ""] if x)
-    log.info("간단 소개 보강 요청 (%d자, %s)", len(summary), why)
+    log.info("간단 소개가 %d자 — %d자 이상으로 보강 요청", len(summary), SUMMARY_MIN)
     out = llm.ask(
         f"""아래 [현재 간단 소개]를 {SUMMARY_MIN}~{SUMMARY_MAX}자로 고쳐라.
 
 구조 — 덩어리 사이에 빈 줄 하나:
 ① 첫 줄: 한 문장 요약
 ② `· ` 로 시작하는 핵심역량 불릿 4개
-③ `[대표 프로젝트] 이름 — 한 줄 소개` + `· ` 불릿 1~2개(성과 수치 필수)
-   + 마지막 줄에 URL 하나. 100~300자
-④ 이미 있으면 그대로 둔다. 없으면 만들지 않는다
+③④ `[...]` 로 시작하는 블록이 이미 있으면 그대로 둔다. **없으면 만들지 않는다** —
+   특히 [대표 프로젝트]를 새로 지어 붙이지 마라. 없는 건 없는 게 맞다
 
 규칙:
 - 불릿 개수를 늘리지 말고 **각 불릿의 내용을 구체화**한다
@@ -970,6 +1225,7 @@ def _save_build(
     headline: str | None = None,
     portfolio_title: str | None = None,
     manual_todos: list[str] | None = None,
+    review_notes: list[str] | None = None,
 ) -> None:
     """조립 결과를 남긴다.
 
@@ -994,17 +1250,19 @@ def _save_build(
         conn.execute(
             """INSERT INTO resume_builds
                  (job_id, ok, required_gaps, gaps, track, headline, portfolio_title,
-                  manual_todos, built_at)
-               VALUES (?,?,?,?,?,?,?,?,?)
+                  manual_todos, review_notes, built_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(job_id) DO UPDATE SET
                  ok=excluded.ok, required_gaps=excluded.required_gaps,
                  gaps=excluded.gaps, track=excluded.track,
                  headline=excluded.headline, portfolio_title=excluded.portfolio_title,
                  manual_todos=excluded.manual_todos,
+                 review_notes=excluded.review_notes,
                  built_at=excluded.built_at""",
             (job_id, 1 if ok else 0, len(required),
              json.dumps(gaps, ensure_ascii=False), track, headline, portfolio_title,
-             json.dumps(manual_todos or [], ensure_ascii=False), now()),
+             json.dumps(manual_todos or [], ensure_ascii=False),
+             json.dumps(review_notes or [], ensure_ascii=False), now()),
         )
         conn.commit()
     finally:
@@ -1022,7 +1280,7 @@ def _load_cached(
     conn = conn or connect()
     try:
         row = conn.execute(
-            "SELECT ok, required_gaps, gaps, portfolio_title, manual_todos, built_at "
+            "SELECT ok, required_gaps, gaps, portfolio_title, manual_todos, review_notes, built_at "
             "FROM resume_builds WHERE job_id=?",
             (job_id,),
         ).fetchone()
@@ -1051,6 +1309,7 @@ def _load_cached(
             "required_gaps": row["required_gaps"],
             "gaps": json.loads(row["gaps"] or "[]"),
             "manual_todos": json.loads(row["manual_todos"] or "[]"),
+            "review_notes": json.loads(row["review_notes"] or "[]"),
             "path": str(path),
             "portfolio_title": row["portfolio_title"],
             "cached": True,
@@ -1287,6 +1546,39 @@ def manual_todos(job_id: int, conn: sqlite3.Connection | None = None) -> list[st
     finally:
         if own:
             conn.close()
+
+
+def review_notes(job_id: int, conn: sqlite3.Connection | None = None) -> list[str]:
+    """검수가 남긴 지적(과 제거된 스킬). 승인 화면에 띄울 것이다."""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        row = conn.execute(
+            "SELECT review_notes FROM resume_builds WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if not row or not row["review_notes"]:
+            return []
+        try:
+            items = json.loads(row["review_notes"])
+        except json.JSONDecodeError:
+            return []
+        return [str(x) for x in items] if isinstance(items, list) else []
+    finally:
+        if own:
+            conn.close()
+
+
+def review_block(notes: list[str]) -> str:
+    """승인 캡션의 검수 블록. 없으면 빈 문자열.
+
+    `todo_block`과 갈라 둔다 — 저쪽은 **사람이 할 일**이고 이쪽은 **사람이 볼 것**이다.
+    섞으면 "내가 뭘 해야 하나"와 "이게 나가도 되나"가 한 목록에 붙는다.
+    """
+    if not notes:
+        return ""
+    lines = "\n".join(f"• {n[:70]}" for n in notes[:3])
+    more = f"\n<i>외 {len(notes) - 3}건</i>" if len(notes) > 3 else ""
+    return f"\n\n⚠️ <b>검수 지적 — 확인해주세요</b>\n{lines}{more}"
 
 
 def submitted_titles(conn: sqlite3.Connection | None = None) -> set[str]:

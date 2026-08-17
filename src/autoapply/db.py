@@ -254,6 +254,8 @@ CREATE TABLE IF NOT EXISTS resume_builds (
     skills        TEXT NOT NULL DEFAULT '[]',-- 실제로 등록된 스킬
     -- 이력서로는 충족 못 하는 공고 요구(증명서 첨부 등). 승인 알림이 읽어 폰에 띄운다.
     manual_todos  TEXT NOT NULL DEFAULT '[]',
+    -- 검수 지적 + 제거된 스킬. 승인 화면에만 띄운다(자동지원을 막지 않는다).
+    review_notes  TEXT NOT NULL DEFAULT '[]',
     -- 이 공고가 어디까지 갔나. 다음 실행이 여기서 이어받는다 (assemble.progress).
     --   assembled   조립 완료 (LLM 결과 있음)
     --   filling     이력서를 채우는 중 — 끊기면 절반만 채워진 것이 남을 수 있다
@@ -485,6 +487,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         # 이메일 별도 송부 등). JSON 배열. 승인 알림이 여기서 읽어 폰에 띄운다 —
         # 본문에 "첨부하였습니다"라고 쓰면 하지 않은 일을 했다고 쓰는 것이 된다.
         "manual_todos": "TEXT NOT NULL DEFAULT '[]'",
+        # 검수(review_editor)가 남긴 지적 + 코드가 제거한 스킬. JSON 배열.
+        # **자동지원을 막지 않는다** — 실측 A/B에서 검수 모델이 4건에 1건씩 잘못된
+        # 날조를 달았다. 차단에 쓰면 멀쩡한 이력서가 선다. 승인 화면에만 띄운다.
+        "review_notes": "TEXT NOT NULL DEFAULT '[]'",
         # 어디까지 갔나. 중단·고장 뒤에 처음부터 다시 하지 않기 위한 것이다.
         "stage": "TEXT",
         "stage_at": "TEXT",
