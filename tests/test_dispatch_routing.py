@@ -59,29 +59,50 @@ def test_cycle_apply(spy):
     assert spy.calls == [((1,), {"defer": False})]
 
 
-def test_autoapply_passes_live_through(spy):
+@pytest.fixture
+def spy_module(monkeypatch, capsys):
+    """`cli.<module>.<name>`을 가짜로 바꾼다. 이동 후의 patch 대상."""
+    calls: list[tuple] = []
+
+    def install(module, name: str):
+        def fake(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"fake": name}
+
+        monkeypatch.setattr(module, name, fake)
+
+    def dispatch(**namespace_kwargs) -> None:
+        cli._dispatch(argparse.Namespace(**namespace_kwargs))
+        capsys.readouterr()
+
+    install.dispatch = dispatch
+    install.calls = calls
+    return install
+
+
+def test_autoapply_passes_live_through(spy_module):
     """`live`가 키워드로 안 넘어가면 dry-run이 실제 제출이 된다."""
-    spy("_autoapply")
-    spy.dispatch(cmd="autoapply", job_id=7, resume_url=None, live=False)
-    assert spy.calls == [((7,), {"resume_url": None, "live": False})]
+    spy_module(cli.prepare_application, "run")
+    spy_module.dispatch(cmd="autoapply", job_id=7, resume_url=None, live=False)
+    assert spy_module.calls == [((7,), {"resume_url": None, "live": False})]
 
 
-def test_autoapply_live_true(spy):
-    spy("_autoapply")
-    spy.dispatch(cmd="autoapply", job_id=7, resume_url="https://x", live=True)
-    assert spy.calls == [((7,), {"resume_url": "https://x", "live": True})]
+def test_autoapply_live_true(spy_module):
+    spy_module(cli.prepare_application, "run")
+    spy_module.dispatch(cmd="autoapply", job_id=7, resume_url="https://x", live=True)
+    assert spy_module.calls == [((7,), {"resume_url": "https://x", "live": True})]
 
 
-def test_apply_passes_live_and_headless(spy):
-    spy("_apply")
-    spy.dispatch(cmd="apply", job_id=7, live=False, headless=False)
-    assert spy.calls == [((7,), {"live": False, "headless": False})]
+def test_apply_passes_live_and_headless(spy_module):
+    spy_module(cli.submit_application, "apply_job")
+    spy_module.dispatch(cmd="apply", job_id=7, live=False, headless=False)
+    assert spy_module.calls == [((7,), {"live": False, "headless": False})]
 
 
-def test_submit(spy):
-    spy("_submit")
-    spy.dispatch(cmd="submit", job_id=7)
-    assert spy.calls == [((7,), {})]
+def test_submit(spy_module):
+    spy_module(cli.submit_application, "submit_registered")
+    spy_module.dispatch(cmd="submit", job_id=7)
+    assert spy_module.calls == [((7,), {})]
 
 
 def test_flush_notify(monkeypatch, capsys):

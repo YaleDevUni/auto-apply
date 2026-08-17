@@ -23,6 +23,7 @@ from src.autoapply.adapters import REGISTRY
 from src.autoapply.db import connect
 from src.autoapply.notify import report, telegram
 from src.autoapply.paths import describe
+from src.autoapply.workflows import context, prepare_application, submit_application
 
 
 def _out(obj) -> None:
@@ -403,7 +404,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.cmd == "capture":
         from src.autoapply.runner import capture
 
-        _out(capture(_job(args.job_id), click=args.click))
+        _out(capture(context.job(args.job_id), click=args.click))
     elif args.cmd == "resume":
         from src.autoapply import assemble
 
@@ -413,7 +414,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.print:
             print("\n" + body)
     elif args.cmd == "autoapply":
-        _out(_autoapply(args.job_id, resume_url=args.resume_url, live=args.live))
+        _out(prepare_application.run(args.job_id, resume_url=args.resume_url, live=args.live))
     elif args.cmd == "cycle-apply":
         _out(_cycle_apply(args.limit, defer=args.defer))
     elif args.cmd == "flush-notify":
@@ -421,9 +422,9 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.cmd == "night-cycle":
         _out(_night_cycle(args.target, defer=args.defer))
     elif args.cmd == "submit":
-        _out(_submit(args.job_id))
+        _out(submit_application.submit_registered(args.job_id))
     elif args.cmd == "apply":
-        _out(_apply(args.job_id, live=args.live, headless=args.headless))
+        _out(submit_application.apply_job(args.job_id, live=args.live, headless=args.headless))
     return 0
 
 
@@ -636,7 +637,7 @@ def _cycle_apply(limit: int, *, defer: bool = False) -> dict:
             #
             # 쌓이는 이력서는 `resumes --cleanup`이 치운다 —
             # `made_resumes`에 우리가 만든 것이 남으므로 근거가 있다.
-            r = _autoapply(t["job_id"], resume_url=None, live=False)
+            r = prepare_application.run(t["job_id"], resume_url=None, live=False)
         except tasks.Cancelled as e:
             # 사람이 멈춘 것을 한 공고의 실패로 삼키면 다음 공고로 넘어간다 —
             # 멈추라고 한 사람 눈에는 그게 "안 멈춘다"다. 위로 올려 최상단이
@@ -680,31 +681,6 @@ def _note_stage_failure(job_id: int, error: str) -> None:
         logging.getLogger(__name__).debug("단계 실패 기록 실패(무시): %s", e)
 
 
-def _submit(job_id: int) -> dict:
-    """준비 때 등록해둔 이력서로 제출만 한다.
-
-    승인 시점에 다시 조립하지 않는 이유: 사람이 검토한 것과 나가는 것이
-    달라진다. 조립은 준비 단계에서 끝났고, 여기서는 그 이력서를 고를 뿐이다.
-    """
-    from src.autoapply import assemble
-    from src.autoapply.runner import resume_editor
-
-    reg = assemble.registration(job_id)
-    if not reg.get("resume_title"):
-        return {"stopped": "등록된 이력서가 없다 — 먼저 준비(cycle-apply)해야 한다"}
-
-    # 보호 이력서(기본·사본메이커)가 등록돼 있으면 내지 않는다. 그건 그 공고에
-    # 맞춰 만든 이력서가 아니라 **원본**이다. 재사용 경로(preview_resume_url)가
-    # 남긴 기록이 그런 모양이고, 실제로 그 상태로 공고 33에 제출이 나갔다.
-    if reg["resume_title"] in resume_editor.protected_titles():
-        return {
-            "stopped": f"등록된 이력서가 원본이다: {reg['resume_title']}",
-            "이유": "공고에 맞춘 사본이 아니라 원본이라 제출하지 않는다",
-            "할 일": f"cli.py autoapply {job_id} 로 이 공고용 이력서를 새로 만들 것",
-        }
-
-    job = _job(job_id, resume_title=reg["resume_title"])
-    return _apply_with(job, live=True)
 
 
 def _browser_open() -> dict:
@@ -774,8 +750,8 @@ def _revise(job_id: int, feedback: str) -> dict:
     # **이어받지 않는다.** 재작성은 "이번엔 다르게 써 달라"는 요청이므로,
     # 지난번에 등록해둔 이력서를 재사용하면 지시가 통째로 무시된 채 옛 이력서가
     # "재작성됨"으로 폰에 다시 올라간다 — 사람은 고쳐진 줄 알고 승인한다.
-    result = _autoapply(job_id, resume_url=None, live=False, reuse=False)
-    target = _job(job_id)
+    result = prepare_application.run(job_id, resume_url=None, live=False, reuse=False)
+    target = context.job(job_id)
     target["fit_score"] = target.get("fit_score") or 0
     report.prepared(
         {**target, "job_id": job_id, "fit_score": _fit_score(job_id)},
@@ -924,321 +900,6 @@ def _llm_cost(job_id: int | None) -> dict:
         }
     finally:
         conn.close()
-
-
-def _resume_title(job: dict) -> str:
-    """공고별 이력서 제목. 제목이 곧 지원 폼에서 이력서를 고르는 열쇠다.
-
-    회사명을 앞에 둔다. 목록에서 사람이 훑을 때 '어느 자리에 낸 것'인지가
-    먼저 보여야 하기 때문이다. 50자 제한이 있어 뒤를 자른다.
-    """
-    company = (job.get("company") or "").strip()
-    title = (job.get("title") or "").strip()
-    name = f"{company} {title}".strip() or "박예일 이력서"
-    return name[:50]
-
-
-def _autoapply(job_id: int, *, resume_url: str | None, live: bool, reuse: bool = True) -> dict:
-    """조립 → 등록 → 지원. 각 단계가 다음 단계의 입력을 만든다.
-
-    이력서 제목이 고리다. 편집기에 채운 뒤 그 제목을 읽어 지원 레시피에 넘기므로,
-    `config.applicability.resumes` 매핑이 더는 필요 없다 — 트랙별로 미리 만들어둔
-    이력서를 고르는 게 아니라 공고마다 만들기 때문이다.
-
-    조립이 `ok=False`(필수요건 근거 없음/검수 반려)면 여기서 멈춘다. 맞지 않는
-    자리에 이름을 남기는 것보다 안 내는 게 낫다.
-    """
-    from src.autoapply import assemble
-    from src.autoapply.runner import resume_editor
-    from src.autoapply.runner.lock import browser_lock
-
-    # 무엇보다 먼저 "여기 이미 냈나"를 본다. 아래 조립은 LLM 3~4회에 수 분이
-    # 걸리는데, 이미 지원한 자리면 그게 전부 버려진다(지원 폼에서야 막힌다).
-    # 페이지 한 번 여는 값으로 그걸 다 아낀다.
-    # 중단 표시를 **단계 경계마다** 본다. 예전에는 night-cycle의 while 루프
-    # 꼭대기에서만 봤다 — 한 건이 조립(LLM)과 등록(브라우저)까지 묶여 있어
-    # /stop을 눌러도 수 분 뒤에야 멈췄고, 사람 눈에는 "안 먹는다"로 보였다
-    # (실측 2026-08-17: cancel_at 07:00:40 → 실제 종료 07:01:44).
-    #
-    # 여기서 접어도 남는 것이 없다: 아직 브라우저에 아무것도 안 썼다.
-    tasks.check("지원준비 시작 전")
-    already = _skip_if_already_applied(job_id)
-    if already:
-        return already
-
-    # 지난번에 어디까지 갔나. 끊긴 자리에서 이어받는다 — 처음부터 다시 하면
-    # 조립(LLM)을 또 하고, 더 나쁘게는 **같은 공고용 이력서를 하나 더 만든다.**
-    # 자세한 재사용 규칙은 assemble.progress의 주석에 있다.
-    prog = assemble.progress(job_id) if reuse else {"resumable": False}
-    if prog["resumable"]:
-        log = logging.getLogger(__name__)
-        log.info("공고 %s — %s 단계에서 이어받는다 (이력서 %r 재사용, 새로 안 만든다)",
-                 job_id, prog["stage"], prog["resume_title"])
-        tasks.check("지원 폼 진입 전")
-        job = _job(job_id, resume_title=prog["resume_title"], require_resume=True)
-        with browser_lock("지원준비", label=f"공고 {job_id}"):
-            result = _apply_with(job, live=live)
-        assemble.set_stage(job_id, "prepared")
-        reg = assemble.registration(job_id)
-        return {
-            "company": _job(job_id).get("company"),
-            "이어받음": prog["stage"],
-            "resume": {"title": prog["resume_title"], "url": prog["resume_url"],
-                       "shot": None, "skills": len(json.loads(reg.get("skills") or "[]")
-                                                   if isinstance(reg.get("skills"), str)
-                                                   else reg.get("skills") or [])},
-            "apply": result,
-        }
-
-    tasks.check("이력서 조립 전")
-    built = assemble.build_editor_json(job_id)
-    if not built["ok"]:
-        return {
-            "stopped": "이력서 조립 단계에서 중단",
-            "이유": f"필수요건 미충족 {built['required_gaps']}건",
-            "gaps": [g["text"][:70] for g in built["gaps"] if g.get("level") == "필수"],
-        }
-
-    # 사본메이커에서 시작한다. 어느 사본을 쓸지는 공고가 정한다 — 사본마다
-    # 용도가 다르고(개발자용·데브옵스·AX·영업), 그 결이 곧 이력서의 뼈대다.
-    job_row = _job(job_id)
-    template = resume_editor.pick_template(job_row)
-    new_title = _resume_title(job_row)
-    logging.getLogger(__name__).info("사본 선택: %s → %r", template, new_title)
-
-    # 등록과 지원을 **한 덩어리로** 잡는다. 둘 사이를 남에게 내주면 이력서를
-    # 만들어둔 채 다른 작업이 탭을 가져가고, 돌아왔을 땐 지원 폼이 아닌 화면에서
-    # 셀렉터를 찾다 타임아웃으로 죽는다. 아래 fill/apply의 browser()는 같은
-    # 프로세스라 재진입으로 그냥 통과한다.
-    # **여기가 마지막 안전 경계다.** fill() 안에서는 중단을 안 본다 —
-    # 편집기는 자동저장이라 중간에 끊으면 절반만 채워진 이력서가 계정에
-    # 남고, 그건 안 만드느니만 못하다. 그래서 들어가기 전에 마지막으로 묻는다.
-    tasks.check("이력서 등록 전")
-    assemble.set_stage(job_id, "assembled")
-    # `filling`은 **시작할 때** 적는다. 다른 단계와 반대인데, 이유는 채우다
-    # 끊긴 이력서를 다음 실행이 재사용하면 절반짜리가 그대로 나가기 때문이다.
-    # 끝난 뒤에 적으면 "채우다 죽었다"가 아무 데도 안 남는다.
-    assemble.set_stage(job_id, "filling")
-    with browser_lock("지원준비", label=f"공고 {job_id}"):
-        filled = resume_editor.fill(
-            built["data"], resume_url=resume_url,
-            template=None if resume_url else template,
-            new_title=new_title, job_id=job_id, dry_run=False,
-        )
-
-        # 등록 결과를 기록해두고, 지원 단계는 DB에서 읽는다. 화면에서 제목을 읽는
-        # 것은 한 번뿐이고, 그 뒤로는 편집기 상태가 바뀌어도 흔들리지 않는다.
-        title = filled.get("title") or assemble.registered_title(job_id)
-        if not title:
-            return {"stopped": "이력서 제목을 읽지 못함 — 어느 이력서를 낼지 정할 수 없다"}
-        assemble.record_registration(
-            job_id, resume_title=title,
-            resume_url=filled.get("url", ""), skills=filled.get("skills") or [],
-            report=resume_editor.fill_report(filled),
-        )
-        # 여기까지 왔으면 플랫폼에 **완성된** 이력서가 실제로 있다. 이 뒤에
-        # 무엇이 죽어도 다음 실행은 이걸 재사용하고 새로 만들지 않는다.
-        assemble.set_stage(job_id, "registered")
-
-        # 이력서는 이미 만들어져 등록됐다. 여기서 접어도 반쯤 만든 것은
-        # 안 남는다 — 지원 폼은 dry-run이라 바깥세상에 아무것도 안 낸다.
-        tasks.check("지원 폼 진입 전")
-        job = _job(job_id, resume_title=title, require_resume=True)
-        result = _apply_with(job, live=live)
-    assemble.set_stage(job_id, "prepared")
-    return {
-        "company": built["company"],
-        # shot은 원티드 편집기 화면을 새로고침(=저장 확인) 후 찍은 실물 사진이다
-        # (resume_editor.fill 안에서 촬영). 폰으로 보내는 미리보기는 이걸 쓴다 —
-        # 로컬에서 그려낸 이미지가 아니라 실제 그 페이지를 보여줘야 한다.
-        "resume": {"title": filled["title"], "url": filled["url"],
-                   "lost": filled.get("lost"), "skills": len(filled.get("skills", [])),
-                   "shot": filled.get("shot"), "data": built["data"]},
-        "apply": result,
-    }
-
-
-def _skip_if_already_applied(job_id: int) -> dict | None:
-    """이미 지원한 자리면 원장에 적고 건너뛸 이유를 돌려준다. 아니면 None.
-
-    `apply_ledger`는 **우리가 낸 것만** 안다. 이 파이프라인을 쓰기 전에 사람이
-    직접 낸 지원은 어디에도 없어서, 그런 자리가 대기열 상위에 그대로 올라온다
-    (실측: 공고 303920 젠스타파트너스 — 화면에 '지원완료' 버튼이 떠 있다).
-
-    한 번 발견하면 원장에 `external`로 적어 **다시는 올라오지 않게** 한다.
-    매번 확인하면 대기열에 옛 지원이 쌓일수록 확인만 하다 끝난다.
-
-    확인 자체가 실패하면(브라우저 사용 중, 세션 끊김, 셀렉터 낡음) 막지 않고
-    진행한다 — 모르는 것을 '지원함'으로 단정하면 멀쩡한 자리를 조용히 버린다.
-    반대 방향은 시간만 쓰고 지원 폼에서 걸린다.
-    """
-    from src.autoapply.runner import apply as apply_mod
-    from src.autoapply.runner.lock import BrowserBusy
-
-    log = logging.getLogger(__name__)
-    job = _job(job_id)
-    try:
-        state = apply_mod.preflight(job)
-    except BrowserBusy:
-        raise
-    except Exception as e:  # noqa: BLE001
-        log.warning("이미 지원했는지 확인 실패(무시하고 진행): %s", e)
-        return None
-
-    if state is not True:
-        return None
-
-    agent.record_external(job_id)
-    return {
-        "already_applied": True,
-        "stopped": "이미 지원한 공고 — 준비하지 않는다",
-        "company": job.get("company"),
-        "url": job.get("url"),
-        "기록": "apply_ledger status=external (대기열에서 영구 제외, 제출 건수·한도에는 안 셈)",
-    }
-
-
-def _job(job_id: int, *, resume_title: str | None = None, require_resume: bool = False) -> dict:
-    """레시피가 쓸 공고 정보. 이력서 제목까지 붙여서 돌려준다.
-
-    require_resume는 **제출 직전에만** 켠다. 이력서를 만들기 전에 부를 때는
-    제목이 아직 없는 게 정상이라, 여기서 멈추면 만들 기회 자체가 없어진다.
-    """
-    from src.autoapply.config import effective_config
-
-    from src.autoapply import portfolio as portfolio_match
-
-    conn = connect()
-    try:
-        row = conn.execute(
-            """SELECT j.id AS job_id, j.platform, j.url, j.company, j.title,
-                      j.description, s.track
-               FROM jobs j LEFT JOIN screening s ON s.job_id = j.id
-               WHERE j.id=?""",
-            (job_id,),
-        ).fetchone()
-        if row is None:
-            raise SystemExit(f"공고 {job_id}가 없다")
-        job = dict(row)
-
-        pf_row = conn.execute(
-            "SELECT portfolio_title FROM resume_builds WHERE job_id=?", (job_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-
-    # 방금 만든 이력서 제목이 있으면 그걸 쓴다. 없을 때만 config 매핑으로 넘어간다
-    # (이력서를 미리 만들어두고 트랙별로 고르던 예전 방식).
-    resumes = effective_config().get("applicability", {}).get("resumes", {})
-    job["resume"] = resume_title or (resumes.get(job["platform"], {}) or {}).get(job["track"])
-
-    # 조립 단계(assemble.build_editor_json)가 고른 포트폴리오. portfolio는
-    # 표시·저장용(NFC 그대로), portfolio_nfd는 지원 레시피 셀렉터용이다 —
-    # 원티드가 업로드형 문서 파일명만 유니코드 NFD로 렌더링해서 그대로 쓰면
-    # text-is() 매칭이 조용히 실패한다(portfolio.py 모듈 docstring 참고).
-    job["portfolio"] = pf_row["portfolio_title"] if pf_row else None
-    job["portfolio_nfd"] = portfolio_match.to_selector_text(job["portfolio"])
-    if not job["resume"] and require_resume:
-        # 여기서 멈추는 게 낫다. 이력서를 못 정한 채 진행하면 레시피가
-        # 자리표시자를 못 채우거나, 더 나쁘게는 엉뚱한 이력서를 고른다.
-        raise SystemExit(
-            f"트랙 '{job['track']}'에 쓸 이력서가 지정되지 않았다.\n"
-            f"config.yaml의 applicability.resumes.{job['platform']}.{job['track']} 에 "
-            f"플랫폼에 저장된 이력서 제목을 그대로 적을 것."
-        )
-    return job
-
-
-def _apply(job_id: int, *, live: bool, headless: bool) -> dict:
-    """dry-run은 선점하지 않는다. 아무것도 제출하지 않으니 자리를 잡을 이유가 없고,
-    잡으면 상한만 태우고 그 자리를 다시 못 건드리게 된다.
-
-    live일 때만 선점한다 — 그리고 선점이 실패하면(중복이거나 상한) 실행하지 않는다.
-    """
-    return _apply_with(_job(job_id, require_resume=True), live=live, headless=headless)
-
-
-def _notify_submitted(job: dict, result: dict) -> None:
-    """제출 결과를 폰으로 알린다. 버튼을 눌렀는데 아무 소식이 없으면
-    다시 누르게 되고, 그건 중복지원 시도가 된다."""
-    from src.autoapply.db import connect as _c
-    from src.autoapply.notify import telegram
-
-    conn = _c()
-    try:
-        text = (
-            f"✅ <b>제출 완료</b>\n{job.get('company')} — {str(job.get('title'))[:40]}\n"
-            f"<i>원장에 기록됨. 같은 자리는 다시 나가지 않습니다.</i>"
-        )
-        shot = result.get("evidence")
-        if not (shot and telegram.send_photo(conn, shot, text)):
-            telegram.notify(conn, text)
-    finally:
-        conn.close()
-
-
-def _apply_with(job: dict, *, live: bool, headless: bool = False) -> dict:
-    """공고 정보가 이미 준비된 경우의 지원 실행. autoapply 체인이 이걸 쓴다."""
-    from src.autoapply.runner import LoginRequired, run
-
-    job_id = job["job_id"]
-    if not live:
-        return run(job, live=False, headless=headless)
-
-    # 제출 직전에 한 번 더 본다. 승인 버튼은 몇 시간 전 알림에서도 눌릴 수 있고,
-    # 그 사이 사람이 원티드에서 직접 냈을 수 있다. 선점(claim) **전에** 봐야
-    # 한다 — 선점부터 하면 그 자리가 오늘 한도 한 칸을 먹는다.
-    already = _skip_if_already_applied(job_id)
-    if already:
-        return {"skipped": True, "reason": "이미 지원한 공고", **already}
-
-    ledger = agent.claim(job_id)
-    if ledger is None:
-        return {"skipped": True, "reason": "이미 처리됐거나 상한 도달", "quota": agent.quota()}
-
-    try:
-        result = run(job, live=True, headless=headless)
-    except LoginRequired as e:
-        # 제출 전에 확실히 실패했다 → 자리를 놓아주고 사람을 부른다.
-        agent.mark_failed(ledger, str(e), release=True)
-        agent.notify_login_required()
-        raise SystemExit(f"로그인 필요: {e}") from e
-
-    if result["submitted"]:
-        agent.mark_submitted(ledger, evidence_path=result["evidence"])
-        _notify_submitted(job, result)
-        _delete_submitted_resume(job_id, job.get("resume") or "")
-    else:
-        # 눌렀는데 완료 화면을 못 봤다. 실제로 접수됐을 수 있으므로 자리를 놓지 않는다.
-        agent.mark_failed(ledger, result["error"] or "제출 확인 실패", release=False)
-    result["ledger"] = ledger
-    return result
-
-
-def _delete_submitted_resume(job_id: int, title: str) -> None:
-    """제출 직후 그 이력서를 플랫폼에서 지운다. 지원이력에서 여전히 접근
-    가능하므로 목록에 남겨둘 이유가 없다 — 남겨두면 max_keep을 금방 채운다.
-
-    로컬 사본이 있을 때만 지운다. 없으면 그게 유일한 기록이라
-    `resume_editor.cleanup()`과 같은 규칙으로 건드리지 않는다. 실패해도 지원
-    자체는 이미 끝났으므로 흐름을 막지 않는다 — 다음 `resumes --cleanup`이
-    나이·개수 기준으로 결국 치운다.
-    """
-    from src.autoapply.paths import RESUME_OUT_DIR
-
-    log = logging.getLogger(__name__)
-    if not title:
-        return
-    if not list(RESUME_OUT_DIR.glob(f"{job_id}-*.json")):
-        log.info("로컬 사본이 없어 제출 이력서를 남겨둔다: %s", title)
-        return
-    try:
-        from src.autoapply.runner import resume_editor
-
-        deleted = resume_editor.delete_after_submit(title)
-        log.info("제출 이력서 삭제 %s: %s", "성공" if deleted else "실패", title)
-    except Exception as e:  # noqa: BLE001
-        log.warning("제출 이력서 삭제 실패(무시, 다음 정리가 치운다): %s", e)
 
 
 if __name__ == "__main__":
