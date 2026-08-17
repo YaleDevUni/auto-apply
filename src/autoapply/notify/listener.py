@@ -28,7 +28,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .. import tasks
+from .. import orchestrator, tasks
 from ..db import get_setting, now, set_setting
 # 모듈째 들여온다. 이름만 가져오면(`from .telegram import notify`) 콜백 처리에서
 # 쓰는 `telegram.answer_callback`이 NameError로 죽는다 — 실제로 '건너뛰기'
@@ -81,58 +81,12 @@ HELP = (
 )
 
 
-# 자가복구가 진행 중이라 자동지원을 붙잡아 둔 상태. 사람이 누른 /pause와
-# **다른 열쇠**를 쓴다. 하나로 합치면 자가복구가 끝나며 푸는 순간 사람이
-# 걸어둔 정지까지 같이 풀린다 — 사람은 자기가 멈춰둔 줄 알고 있는데 지원이
-# 나가는 상태가 되고, 그건 되돌릴 수 없다.
-FIX_HOLD_KEY = "pipeline_hold_fix"
-
-# 붙잡아 둔 지 이 시간이 지나면 무시한다. 수행 프로세스가 풀지 못하고 죽으면
-# (kill -9, 맥 재부팅) 표식만 남아 파이프라인이 영영 멈춘다. 사람이 눈치채기
-# 전까지 며칠이 갈 수 있는 종류의 고장이라 시한을 둔다.
-FIX_HOLD_STALE_HOURS = 12
-
-
-def hold_for_fix(conn: sqlite3.Connection, plan_id: int | None, note: str = "") -> None:
-    """자가복구가 도는 동안 자동지원을 붙잡는다.
-
-    고장이 난 채로 지원을 계속 내보내면, 고치는 중에도 같은 고장으로 자리가
-    소모된다. 최악은 절반만 채워진 이력서가 실제로 제출되는 것이다.
-    """
-    import json as _json
-
-    set_setting(conn, FIX_HOLD_KEY, _json.dumps(
-        {"plan_id": plan_id, "since": now(), "note": note[:120]}, ensure_ascii=False
-    ))
-
-
-def release_fix_hold(conn: sqlite3.Connection) -> None:
-    set_setting(conn, FIX_HOLD_KEY, "")
-
-
-def fix_hold(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    """지금 걸린 자가복구 보류. 오래된 것은 여기서 스스로 걷어낸다."""
-    import json as _json
-    from datetime import datetime
-
-    raw = get_setting(conn, FIX_HOLD_KEY, "")
-    if not raw:
-        return None
-    try:
-        info = _json.loads(raw)
-        elapsed = (
-            datetime.now().astimezone() - datetime.fromisoformat(info["since"])
-        ).total_seconds() / 3600
-    except Exception:  # noqa: BLE001
-        release_fix_hold(conn)
-        return None
-
-    if elapsed >= FIX_HOLD_STALE_HOURS:
-        log.warning("자가복구 보류가 %.0f시간째 — 걷어낸다 (수행이 풀지 못하고 죽은 듯)", elapsed)
-        release_fix_hold(conn)
-        return None
-    info["hours"] = elapsed
-    return info
+# 자가복구 보류 상태(FIX_HOLD_KEY 등)는 orchestrator.py가 소유한다 — 그쪽이
+# hold_for_fix()/release_fix_hold()를 거는 주체다. 여기 있던 걸 옮기고 나서는
+# orchestrator.fix_hold()로 참조만 한다. (예전엔 여기 정의돼 있었고
+# orchestrator가 함수-지역 import로 가져다 썼다 — 그 반대 방향 의존이 이
+# 모듈의 /reverts·/revert가 orchestrator를 불러오는 것과 맞물려 순환
+# 참조였다. NEXT.md 참고.)
 
 
 def is_paused(conn: sqlite3.Connection) -> bool:
@@ -143,14 +97,14 @@ def is_paused(conn: sqlite3.Connection) -> bool:
     """
     if get_setting(conn, PAUSE_KEY, "0") == "1":
         return True
-    return fix_hold(conn) is not None
+    return orchestrator.fix_hold(conn) is not None
 
 
 def pause_reason(conn: sqlite3.Connection) -> str:
     """왜 멈췄는지 한 줄. 사람이 /status에서 이유를 못 보면 /resume만 누르게 된다."""
     if get_setting(conn, PAUSE_KEY, "0") == "1":
         return "사람이 정지시킴 (/resume 으로 해제)"
-    held = fix_hold(conn)
+    held = orchestrator.fix_hold(conn)
     if held:
         plan = f" #{held['plan_id']}" if held.get("plan_id") else ""
         return f"자가복구 진행 중{plan} — 고쳐지면 자동으로 재개됩니다"
@@ -306,10 +260,10 @@ def _cmd_resume(conn) -> str:
     """사람이 거는 재개. 자가복구 보류도 같이 푼다 — 사람에게는 늘 빠져나갈
     길이 있어야 한다. 보류가 남아 있는데 /resume이 안 들으면, 왜 안 도는지
     모르는 채로 밤이 지나간다."""
-    held = fix_hold(conn)
+    held = orchestrator.fix_hold(conn)
     set_setting(conn, PAUSE_KEY, "0")
     if held:
-        release_fix_hold(conn)
+        orchestrator.release_fix_hold(conn)
         plan = f" #{held['plan_id']}" if held.get("plan_id") else ""
         return (
             f"▶️ 자동지원을 재개했습니다.\n"
@@ -478,7 +432,7 @@ def _offer_resume_and_start(conn: sqlite3.Connection, target: int) -> str:
     그렇다고 거절만 하면 예전 증상이 반쯤 남는다 — 왜 안 되는지 알아도
     `/resume`을 따로 치고 `/apply`를 다시 쳐야 한다. 버튼 하나로 합친다.
     """
-    held = fix_hold(conn)
+    held = orchestrator.fix_hold(conn)
     why = pause_reason(conn)
     warn = (
         "\n\n<i>⚠️ 자가복구가 진행 중입니다 — 고장이 안 고쳐진 상태로 "
@@ -539,8 +493,6 @@ def _cmd_plans(conn: sqlite3.Connection, rest: str) -> str:
 def _cmd_reverts(conn: sqlite3.Connection, rest: str) -> str:
     """자동으로 main에 들어간 것들. 사람이 나중에 훑어볼 수 있어야 한다 —
     자는 동안 반영된 걸 확인할 방법이 없으면 자동반영을 믿을 수 없다."""
-    from .. import orchestrator
-
     rows = orchestrator.recent_auto_commits(conn)
     if not rows:
         return "↩️ 자동반영된 커밋이 없습니다."
@@ -557,8 +509,6 @@ def _cmd_reverts(conn: sqlite3.Connection, rest: str) -> str:
 
 
 def _cmd_revert(conn: sqlite3.Connection, rest: str) -> str:
-    from .. import orchestrator
-
     sha = rest.strip()
     if not sha:
         return "사용법: <code>/revert &lt;커밋해시&gt;</code>  (<code>/reverts</code>로 목록)"
@@ -884,7 +834,7 @@ def _handle_fix_callback(conn: sqlite3.Connection, cb_id: str, data: str) -> Non
             "UPDATE fix_plans SET status='rejected', decided_at=? WHERE id=?", (now(), plan_id)
         )
         conn.commit()
-        release_fix_hold(conn)
+        orchestrator.release_fix_hold(conn)
         telegram.answer_callback(conn, cb_id, "거절했습니다")
         notify(
             conn,

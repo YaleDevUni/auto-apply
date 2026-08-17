@@ -1,15 +1,14 @@
 """모든 모듈이 import되는가 — 그리고 순환 참조가 새 경로로 터지지 않는가.
 
-이 저장소는 함수-지역(lazy) import가 많다. `cli.py`에만 8곳이고,
-`orchestrator.py`와 `notify/listener.py`는 **서로를** 지역 import한다:
+이 저장소는 함수-지역(lazy) import가 많다(`cli.py`에만 8곳). `orchestrator.py`와
+`notify/listener.py`는 예전엔 **서로를** 지역 import해서 순환을 이뤘는데(자가복구
+보류 상태를 listener가 갖고 orchestrator가 빌려 쓰고, listener의 /reverts·/revert가
+거꾸로 orchestrator를 빌려 쓰는 구조), 그 상태(`FIX_HOLD_KEY`/`hold_for_fix`/
+`release_fix_hold`/`fix_hold`)를 orchestrator.py로 옮겨 순환 자체를 없앴다 —
+이제 listener → orchestrator 한 방향뿐이다(`test_orchestrator_listener_cycle_is_gone`).
 
-    orchestrator.py:528,727  →  from .notify.listener import hold_for_fix, release_fix_hold
-    notify/listener.py:540,558  →  from .. import orchestrator
-
-이건 우연이 아니라 순환 의존이 실재한다는 증거다. 리팩터링으로 코드를 새 모듈에
-옮기면서 무심코 top-level import로 끌어올리면 그 순환이 **새 경로로 터진다.**
-그리고 지역 import는 그 코드가 실행될 때까지 아무것도 안 알려준다 — 새벽 3시에야
-드러난다.
+지역 import 자체는 여전히 저장소 곳곳에 있고, 그건 그 코드가 실행될 때까지
+아무것도 안 알려준다는 위험이 그대로다 — 새벽 3시에야 드러난다.
 
 여기서는 각 모듈을 **깨끗한 프로세스에서 하나씩** import한다. 한 프로세스에서
 전부 import하면 앞서 로드된 모듈이 순환을 가려준다(sys.modules 캐시가 두 번째
@@ -71,23 +70,26 @@ def test_cli_imports_alone():
     assert proc.returncode == 0, f"cli.py import 실패:\n{proc.stderr[-2000:]}"
 
 
-def test_circular_pair_stays_lazy():
-    """`orchestrator` ↔ `listener` 순환이 아직 지역 import로 격리돼 있는가.
+def test_orchestrator_listener_cycle_is_gone():
+    """`orchestrator` ↔ `notify.listener` 순환 참조가 실제로 끊겼는가.
 
-    둘 중 하나라도 top-level import로 올라오면 이 테스트가 먼저 알려준다.
-    고치는 방법은 "지역 import로 되돌린다"가 아니라 "순환을 실제로 끊는다"이지만,
-    그건 이번 회차의 범위가 아니라 NEXT.md에 있다.
+    자가복구 보류 상태를 orchestrator.py로 옮겨서 listener → orchestrator
+    한 방향만 남았다. 되돌아가지 않도록 두 가지를 지킨다: orchestrator.py가
+    notify.listener를 (top-level이든 지역이든) 다시 참조하지 않는다, 그리고
+    두 모듈을 어느 순서로 먼저 import해도 — 순환이 있었다면 순서에 따라
+    ImportError가 나거나 부분 초기화된 모듈이 잡힌다 — 깨끗한 프로세스에서
+    죽지 않는다.
     """
     orch = (PKG / "orchestrator.py").read_text(encoding="utf-8")
-    listener = (PKG / "notify" / "listener.py").read_text(encoding="utf-8")
+    assert "notify.listener" not in orch and "notify import listener" not in orch, (
+        "orchestrator.py가 다시 notify.listener를 참조한다 — 순환이 되돌아왔다"
+    )
 
-    for name, src, needle in [
-        ("orchestrator.py", orch, "from .notify.listener import"),
-        ("notify/listener.py", listener, "from .. import orchestrator"),
-    ]:
-        for line in src.splitlines():
-            if needle in line:
-                assert line.startswith((" ", "\t")), (
-                    f"{name}의 `{needle}`가 top-level로 올라왔다 — "
-                    f"순환 import가 터질 자리다"
-                )
+    for order in (
+        "import autoapply.orchestrator; import autoapply.notify.listener",
+        "import autoapply.notify.listener; import autoapply.orchestrator",
+    ):
+        proc = subprocess.run(
+            [sys.executable, "-c", order], cwd=ROOT, capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, f"`{order}` 실패:\n{proc.stderr[-2000:]}"

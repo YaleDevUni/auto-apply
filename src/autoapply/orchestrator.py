@@ -74,12 +74,68 @@ import subprocess
 from typing import Any
 
 from .config import effective_config
-from .db import connect, now
+from .db import connect, get_setting, now, set_setting
 from .llm import LoginExpired, UsageLimited, raise_if_limited_failure
 from .notify import telegram
 from .paths import CODE_ROOT
 
 log = logging.getLogger(__name__)
+
+# 자가복구가 진행 중이라 자동지원을 붙잡아 둔 상태. 사람이 누른 /pause와
+# **다른 열쇠**를 쓴다. 하나로 합치면 자가복구가 끝나며 푸는 순간 사람이
+# 걸어둔 정지까지 같이 풀린다 — 사람은 자기가 멈춰둔 줄 알고 있는데 지원이
+# 나가는 상태가 되고, 그건 되돌릴 수 없다.
+#
+# 원래 notify/listener.py에 있었다. orchestrator가 이걸 쓰려면 listener를
+# import해야 했고, listener도 /reverts·/revert에서 orchestrator를 불러
+# 순환 참조였다 — 양쪽 다 함수-지역 import로 우회 중이었다(NEXT.md).
+# 여기로 옮기면 이 상태는 본질적으로 자가복구(이 모듈)가 소유한 것이므로
+# 자연스럽고, listener는 이제 orchestrator만 한 방향으로 참조하면 된다.
+FIX_HOLD_KEY = "pipeline_hold_fix"
+
+# 붙잡아 둔 지 이 시간이 지나면 무시한다. 수행 프로세스가 풀지 못하고 죽으면
+# (kill -9, 맥 재부팅) 표식만 남아 파이프라인이 영영 멈춘다. 사람이 눈치채기
+# 전까지 며칠이 갈 수 있는 종류의 고장이라 시한을 둔다.
+FIX_HOLD_STALE_HOURS = 12
+
+
+def hold_for_fix(conn: sqlite3.Connection, plan_id: int | None, note: str = "") -> None:
+    """자가복구가 도는 동안 자동지원을 붙잡는다.
+
+    고장이 난 채로 지원을 계속 내보내면, 고치는 중에도 같은 고장으로 자리가
+    소모된다. 최악은 절반만 채워진 이력서가 실제로 제출되는 것이다.
+    """
+    set_setting(conn, FIX_HOLD_KEY, json.dumps(
+        {"plan_id": plan_id, "since": now(), "note": note[:120]}, ensure_ascii=False
+    ))
+
+
+def release_fix_hold(conn: sqlite3.Connection) -> None:
+    set_setting(conn, FIX_HOLD_KEY, "")
+
+
+def fix_hold(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """지금 걸린 자가복구 보류. 오래된 것은 여기서 스스로 걷어낸다."""
+    from datetime import datetime
+
+    raw = get_setting(conn, FIX_HOLD_KEY, "")
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw)
+        elapsed = (
+            datetime.now().astimezone() - datetime.fromisoformat(info["since"])
+        ).total_seconds() / 3600
+    except Exception:  # noqa: BLE001
+        release_fix_hold(conn)
+        return None
+
+    if elapsed >= FIX_HOLD_STALE_HOURS:
+        log.warning("자가복구 보류가 %.0f시간째 — 걷어낸다 (수행이 풀지 못하고 죽은 듯)", elapsed)
+        release_fix_hold(conn)
+        return None
+    info["hours"] = elapsed
+    return info
 
 # 계획은 **읽기만** 한다. Edit/Write를 주지 않는 이유는 단순하다 — 계획 단계에서
 # 코드가 바뀌면 그 뒤의 위험도 판정과 검증이 전부 헛것이 된다. 무엇을 고칠지
@@ -525,8 +581,6 @@ def plan(conn: sqlite3.Connection | None = None, *, limit: int = 1) -> dict[str,
     무엇이 무엇을 깨뜨렸는지 못 가린다. 게다가 계획마다 승인이 필요하므로
     여러 개를 한꺼번에 올리면 폰이 도배된다.
     """
-    from .notify.listener import hold_for_fix, release_fix_hold
-
     own = conn is None
     conn = conn or connect()
     try:
@@ -724,8 +778,6 @@ def execute(conn: sqlite3.Connection | None = None, plan_id: int = 0) -> dict[st
     계획 세션과 **다른 프로세스**에서 도는 것이 정상이다 — 승인 버튼은 몇 시간
     뒤에 눌리고, 그때 이 함수만 계획을 읽고 시작한다.
     """
-    from .notify.listener import release_fix_hold
-
     own = conn is None
     conn = conn or connect()
     try:

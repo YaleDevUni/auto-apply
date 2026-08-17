@@ -101,8 +101,22 @@ FastAPI는 여기에 HTTP 껍데기를 씌우는 것뿐이라 지금은 필요 �
       실패해도 홀더 pid는 남는지, 마커 일치 시 kill, pid 재활용으로 마커
       없을 때 skip, 파일 없을 때 noop, ours/foreign 양쪽에서 홀더를 같이
       정리하는지). pytest 161건 통과(153+8, 회귀 없음).
-- [ ] `orchestrator.py` ↔ `notify/listener.py` 순환 참조. 양쪽이 함수-지역
-      import로 회피 중이라 top-level로 올리면 터진다
+- [x] ~~`orchestrator.py` ↔ `notify/listener.py` 순환 참조~~ (2026-08-18
+      낮 회차에서 고침) — 순환의 실체는 자가복구 보류 상태
+      (`FIX_HOLD_KEY`/`hold_for_fix`/`release_fix_hold`/`fix_hold`)가
+      `notify/listener.py`에 있는데 `orchestrator.py`(`plan()`/`execute()`)가
+      그걸 빌려 쓰고, 거꾸로 listener의 `/reverts`·`/revert`가
+      `orchestrator.recent_auto_commits`/`revert`를 빌려 쓰는 두 방향
+      의존이었다. 그 상태는 본질적으로 자가복구(orchestrator) 소유이므로
+      통째로 `orchestrator.py`로 옮겼다 — 이제 `notify/listener.py`가
+      `orchestrator`를 top-level import하는 한 방향만 남았고
+      `orchestrator.py`는 `notify.listener`를 전혀 모른다.
+      검증: `tests/test_imports.py`의 `test_circular_pair_stays_lazy`(순환이
+      지역 import로 격리돼 있는지 확인하던 낡은 가정)를
+      `test_orchestrator_listener_cycle_is_gone`으로 교체 —
+      orchestrator.py가 notify.listener를 다시 참조하지 않는지 정적으로
+      확인하고, 두 모듈을 어느 순서로 먼저 import해도(깨끗한 서브프로세스)
+      죽지 않는지 실제로 실행해 확인. pytest 161건 통과(160+1, 회귀 없음).
 - [ ] 원장 요약이 한 단어 지시('짧게')에서 근거를 지어낼 때가 있다. 기록한 줄을
       폰으로 되돌려주므로 사람이 고칠 수 있지만 스스로는 못 걸러낸다.
       자동 승격은 **폐기**했다 — 한 공고의 특수 요구가 조용히 규칙이 될 위험이
