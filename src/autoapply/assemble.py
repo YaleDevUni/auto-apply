@@ -483,7 +483,7 @@ def build(
 
 EDITOR_SCHEMA = """{
   "headline": "한 줄 타이틀 (공고에 맞춰 매번 다시 씀)",
-  "summary": "간단 소개. 아래 형식을 정확히 지킨다.\n  · 첫 줄: 한 문장 요약 (무엇을 하는 개발자인가)\n  · 빈 줄 하나\n  · '· ' 로 시작하는 핵심역량 불릿 4개. 가이드 §2의 핵심역량 항목이 이것이다\n  · 각 불릿은 한 줄, 태도가 아니라 역량/경험 단위\n  전체 **450~600자**. 원티드가 400자 미만이면 이력서 완성도를 깎으므로 반드시 넘긴다. 줄바꿈(\\n)을 실제로 넣는다 — 한 문단으로 붙이지 않는다",
+  "summary": "간단 소개. 가이드 §2-1의 네 덩어리를 그 순서대로 넣는다. 덩어리 사이에는 빈 줄 하나.\n  ① 첫 줄: 한 문장 요약 (무엇을 하는 개발자인가). 이 공고의 1순위 역량이 이 줄에 들어간다\n  ② '· ' 로 시작하는 핵심역량 불릿 4개. 각 한 줄, 태도가 아니라 역량/경험 단위\n  ③ 가이드 §8의 [대표 프로젝트] 블록 100~300자. '[대표 프로젝트] 이름 — 한 줄 소개' + '· ' 불릿 1~2개(성과 수치 필수) + 마지막 줄에 URL 하나. URL은 가이드 §3.4 표의 값을 그대로 옮긴다 — 조합해 만들지 않는다. 비공개 프로젝트는 링크가 없으므로 이 블록에 쓰지 않는다\n  전체 **550~850자**. 원티드가 400자 미만이면 이력서 완성도를 깎으므로 반드시 넘긴다. 줄바꿈(\\n)을 실제로 넣는다 — 한 문단으로 붙이지 않는다",
   "experiences": [
     {"company": "회사명", "job_role": "직무", "business_title": "직책",
      "start": "YYYY.MM", "end": "YYYY.MM",
@@ -503,6 +503,7 @@ EDITOR_SCHEMA = """{
   "skills": ["스킬", "나열"],
   "links": [{"name": "GitHub", "url": "https://..."}],
   "gaps": [{"level": "필수|우대", "text": "공고 요건 중 근거가 없는 항목"}]
+
 }"""
 
 
@@ -594,9 +595,26 @@ def build_editor_json(
 가이드 §6-1 'AI 활용'은 **출력하지 않는다.** 그 칸은 사람이 직접 등록해 둔
 자리다. §6-1의 근거 표는 다른 필드(간단 소개·주요 성과)에 녹이는 용도로만 쓴다.
 
-**한 분야로 초점을 맞춘다.** 공고가 요구하는 핵심 역량 하나를 정하고 거기에 맞춰
-구성한다. 백엔드·DevOps·인프라·AI를 한 이력서에 고루 담으면 어느 것도 강해 보이지
-않는다. §7 우선순위표의 1순위를 축으로 삼고, 2·3순위는 보조로만 쓴다.
+**순서는 직무명이 아니라 [채용공고]의 자격요건이 정한다(§7-0).** 먼저 자격요건·
+우대사항·주요업무·기술스택에 나온 기술/역량을 전부 나열하고, 각각에 §3 사실 저장소의
+근거를 붙인 뒤, **필수요건을 많이 덮는 경험부터** 앞에 놓는다. §7-3 기본값 표는 공고에
+요건이 거의 안 적혀 있을 때만 본다.
+
+직무명이 '백엔드'여도 자격요건에 AWS·Docker·CI/CD가 있으면 그건 백엔드 기본값 행이
+아니다 — 인프라 경험((D) 배포 자동화 / (E) AWS 마이그레이션)을 1~2순위로 끌어올린다.
+자격요건에 적혀 있는데 §3에 근거가 있는 항목이 이력서에 안 나타나면, 그건 그 공고의
+절반을 버린 것이다.
+
+**한 분야로 초점을 맞춘다.** 위 정렬의 1순위를 축으로 삼고 2·3순위는 보조로만 쓴다.
+요건이 셋 이상 갈리면(백엔드+인프라+AI) 필수요건을 가장 많이 덮는 것 하나를 축으로
+잡고 나머지는 그 경험의 불릿 안에 녹인다. 세 축을 나란히 세우지 않는다.
+
+**간단 소개(summary)에는 대표 프로젝트 링크 블록을 반드시 넣는다(§8).** 링크 칸은
+공고와 무관하게 고정돼 있어, 이 공고에 맞는 저장소를 보여줄 수 있는 자리가 여기뿐이다.
+URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝트는 링크가 없으므로 내용으로만
+쓰고, 링크는 공개 저장소 중 다음으로 맞는 것을 고른다.
+
+
 
 **사고 과정을 출력하지 않는다.** "공고는 ~이므로 §7 조합으로 구성했다" 같은 문장은
 이력서 내용이 아니다. 실측에서 그런 문장이 간단 소개 맨 앞에 그대로 들어갔다.
@@ -632,9 +650,14 @@ def build_editor_json(
     # 보강도 LLM 호출이다(llm.timeout_sec 기본 900초). 여기서 한 번 더 보면
     # /stop이 최대 15분을 덜 기다린다. 아직 아무것도 저장하지 않았으므로
     # 접어도 남는 것이 없다.
+    # 지어낸 URL을 **보강 전에** 걷어낸다. 순서가 반대면, 링크 줄이 지워지면서
+    # 글자수가 최소치 아래로 떨어져도 다시 받을 기회가 없다. 먼저 지우면
+    # 보강이 "링크 없음"을 보고 §3.4 표의 진짜 주소로 다시 채운다.
+    _strip_unknown_links(data, guide)
     tasks.check("이력서 조립 중")
     _ensure_summary_length(data, job, guide)
     _strip_reasoning(data)  # 보강 응답에도 섞일 수 있다
+    _strip_unknown_links(data, guide)  # 보강도 지어낼 수 있다. 저장 전에 한 번 더
 
     gaps = data.get("gaps") or []
     required = [g for g in gaps if g.get("level") == "필수"]
@@ -689,7 +712,19 @@ REASONING = re.compile(
 # 남아 있으면 편집기 채우기가 그 값을 덮어쓸 통로가 생긴다.
 MANUAL_FIELDS = ("ai_usage",)
 
-SUMMARY_MIN = 450
+# 간단 소개 길이. 네 덩어리(요약·핵심역량·대표 프로젝트·공고별 요구)가 들어가므로
+# 예전 450자로는 대표 프로젝트 블록(100~300자)이 들어갈 자리가 없다.
+SUMMARY_MIN = 550
+SUMMARY_MAX = 850
+# 보강 결과를 받아들이는 상한. 목표(SUMMARY_MAX)보다 넉넉히 둔다 — 조금 넘겼다고
+# 되돌리면 짧은 원문이 그대로 남아 완성도가 깎인다.
+SUMMARY_HARD_MAX = 1000
+
+# 간단 소개 안의 블록 머리. 판단 근거로 오인해 지우면 안 되는 자리다 —
+# 지원동기는 "이 공고의 ...를 하고 싶다"처럼 REASONING 패턴과 겹치는 문장이 정상이다.
+SUMMARY_BLOCK_HEAD = ("[", "·")
+
+URL_RE = re.compile(r"https?://[^\s)\]>,]+")
 
 
 def _strip_reasoning(data: dict[str, Any]) -> None:
@@ -700,16 +735,61 @@ def _strip_reasoning(data: dict[str, Any]) -> None:
 
     문단 단위로 검사한다. 근거 문장은 보통 첫 문단에 통째로 오고, 본문 불릿에는
     섞이지 않는다.
+
+    `[대표 프로젝트]`·`[지원동기]` 블록은 건드리지 않는다. 지원동기는 공고를 근거로
+    쓰는 것이 정상이라 REASONING 패턴("이 공고의 …를 …")과 겹치는데, 그걸 판단
+    근거로 오인해 지우면 공고가 요구한 항목이 통째로 사라진다.
     """
     for key in ("summary",):
         text = data.get(key)
         if not isinstance(text, str) or not text.strip():
             continue
         blocks = [b for b in text.split("\n\n")]
-        kept = [b for b in blocks if not (REASONING.search(b) and not b.strip().startswith("·"))]
+        kept = [
+            b for b in blocks
+            if not (REASONING.search(b) and not b.strip().startswith(SUMMARY_BLOCK_HEAD))
+        ]
         if len(kept) != len(blocks):
             log.info("%s에서 판단 근거 문단 %d개 제거", key, len(blocks) - len(kept))
         data[key] = "\n\n".join(kept).strip()
+
+
+def _strip_unknown_links(data: dict[str, Any], guide: str) -> None:
+    """가이드에 없는 URL을 간단 소개에서 걷어낸다.
+
+    §8이 요구하는 대표 프로젝트 링크는 **사실 저장소에 적힌 값 그대로**여야 한다.
+    모델은 저장소 이름을 보고 프리픽스를 붙여 URL을 만들어내는데, 그렇게 만든 주소는
+    맞을 때도 있고 404일 때도 있다. 사용자 이름으로 나가는 이력서에 죽은 링크가
+    실리면 확인할 방법이 없다 — 없는 링크가 틀린 링크보다 낫다.
+
+    지우는 단위는 **그 줄에 내용이 남는지**로 가른다. `· 소스코드: <주소>` 처럼
+    주소가 곧 그 줄의 전부면 줄째 지운다 — URL만 빼면 꼬리표만 남는다. 반대로
+    문장 안에 주소가 섞여 있으면 주소만 뺀다. 줄째 지우는 규칙 하나로 밀면,
+    모델이 간단 소개를 한 줄로 내놓았을 때 **본문 전체가 사라진다.**
+    """
+    text = data.get("summary")
+    if not isinstance(text, str) or "http" not in text:
+        return
+
+    dropped: list[str] = []
+    kept_lines: list[str] = []
+    for line in text.splitlines():
+        bad = [u for u in URL_RE.findall(line) if u.rstrip("/.,)") not in guide]
+        if not bad:
+            kept_lines.append(line)
+            continue
+        dropped.extend(bad)
+        rest = line
+        for u in bad:
+            rest = rest.replace(u, "")
+        # 주소를 빼고 남는 것이 꼬리표뿐이면 줄을 버린다.
+        if len(rest.strip(" -·•:,.\t")) >= 20:
+            kept_lines.append(rest.rstrip())
+
+    if not dropped:
+        return
+    log.warning("가이드에 없는 URL %d개를 간단 소개에서 제거: %s", len(dropped), dropped[:3])
+    data["summary"] = re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
 
 
 def _drop_manual_fields(data: dict[str, Any]) -> None:
@@ -726,28 +806,44 @@ def _drop_manual_fields(data: dict[str, Any]) -> None:
 
 
 def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str) -> None:
-    """간단 소개가 짧으면 **그 필드만** 다시 받는다.
+    """간단 소개가 짧거나 **대표 프로젝트 링크가 없으면** 그 필드만 다시 받는다.
 
     원티드는 400자 미만이면 이력서 완성도를 깎는다. 그런데 프롬프트로 글자수를
     지시해도 잘 안 지켜진다(실측: 450자를 요구했는데 314자). 지시를 더 세게 쓰는
     대신 코드가 재고 모자라면 다시 받는다 — 이 프로젝트의 다른 검증들과 같은
     방식이다.
 
+    링크도 같은 부류다. §8의 대표 프로젝트 블록은 **링크 칸이 공고마다 바뀌지 않아서**
+    만든 자리라, URL이 빠지면 그 블록은 있으나 마나다. 글자수와 함께 코드가 본다.
+
     전체를 다시 만들지 않는 이유: 출력 토큰에 시간이 선형이라 전체 재생성은
     비싸다. v1이 자소서 한 건에 98초 걸린 원인이 그 통짜 재생성 루프였다.
     """
     summary = (data.get("summary") or "").strip()
-    if len(summary) >= SUMMARY_MIN:
+    short = len(summary) < SUMMARY_MIN
+    no_link = not URL_RE.search(summary)
+    if not (short or no_link):
         return
 
-    log.info("간단 소개가 %d자 — %d자 이상으로 보강 요청", len(summary), SUMMARY_MIN)
+    why = ", ".join(x for x in ["짧음" if short else "", "대표 프로젝트 링크 없음"
+                                if no_link else ""] if x)
+    log.info("간단 소개 보강 요청 (%d자, %s)", len(summary), why)
     out = llm.ask(
-        f"""아래 [현재 간단 소개]를 {SUMMARY_MIN}~600자로 늘려라.
+        f"""아래 [현재 간단 소개]를 {SUMMARY_MIN}~{SUMMARY_MAX}자로 고쳐라.
+
+구조 — 덩어리 사이에 빈 줄 하나:
+① 첫 줄: 한 문장 요약
+② `· ` 로 시작하는 핵심역량 불릿 4개
+③ `[대표 프로젝트] 이름 — 한 줄 소개` + `· ` 불릿 1~2개(성과 수치 필수)
+   + 마지막 줄에 URL 하나. 100~300자
+④ 그 밖에 `[...]` 로 시작하는 블록이 이미 있으면 그대로 둔다. 없으면 만들지 않는다
 
 규칙:
-- 구조를 유지한다. 첫 줄 한 문장 요약 + 빈 줄 + `· ` 불릿 4개.
 - 불릿 개수를 늘리지 말고 **각 불릿의 내용을 구체화**한다
   (맡은 범위, 사용 기술, 결과 수치).
+- ③의 URL은 [사실 저장소] §3.4 표에 **적힌 그대로** 옮긴다. 저장소 이름에
+  프리픽스를 붙여 만들지 마라 — 없는 주소가 만들어진다. 표에 `비공개`라고 적힌
+  프로젝트는 링크가 없으므로 ③에 쓰지 않는다.
 - [사실 저장소]에 없는 내용을 만들지 않는다.
 - 명사형 종결. `~습니다` 금지. 주어 생략.
 - 결과 텍스트만 출력한다. 설명·코드펜스 금지.
@@ -763,10 +859,36 @@ def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str
         job_id=job.get("id"), phase="summary_ensure",
     ).strip()
 
-    if SUMMARY_MIN <= len(out) <= 900:
+    out = _restore_blocks(summary, out)
+    if SUMMARY_MIN <= len(out) <= SUMMARY_HARD_MAX:
         data["summary"] = out
     else:
         log.warning("보강 결과가 %d자 — 원문을 유지한다", len(out))
+
+
+def _restore_blocks(old: str, new: str) -> str:
+    """보강이 통째로 날린 `[...]` 블록을 되붙인다.
+
+    보강은 간단 소개 **전체**를 새로 받는다. 그래서 `[대표 프로젝트]` 블록이 조용히 사라질 수 있는데, 그건 공고가 명시적으로 요구한
+    항목이라 없어지면 서류 검토도 못 받는다. "그대로 둬라"는 지시로는 부족하다 —
+    이 저장소가 프롬프트 대신 코드로 막아온 것들과 같은 부류다.
+
+    머리표(`[지원동기]` 등)로 대조한다. 내용은 바뀌어도 되지만 블록 자체가
+    없어지면 안 된다.
+    """
+    missing = []
+    for block in old.split("\n\n"):
+        head = block.strip().split("\n", 1)[0].strip()
+        if not head.startswith("[") or "]" not in head:
+            continue
+        marker = head[: head.index("]") + 1]
+        if marker not in new:
+            missing.append(block.strip())
+    if not missing:
+        return new
+    log.info("보강이 지운 블록 %d개를 되붙인다: %s",
+             len(missing), [m.split("\n", 1)[0][:20] for m in missing])
+    return (new.rstrip() + "\n\n" + "\n\n".join(missing)).strip()
 
 
 def _parse_json(raw: str) -> dict[str, Any]:
@@ -809,6 +931,7 @@ def _save_build(
 
     portfolio_title도 같은 이유로 여기 둔다 — 지원 단계가 이력서 제목과
     같은 자리에서 읽어 레시피에 넘긴다.
+
     """
     own = conn is None
     conn = conn or connect()
