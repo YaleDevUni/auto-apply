@@ -17,6 +17,16 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/autoapply"]
 
+[project.optional-dependencies]
+# 이동 리팩터링의 그물. 기능이 아니라 전제조건이다 — 자세한 이유는 tests/ 각 파일 앞머리에.
+dev = ["pytest>=8"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pytest.ini_options]
+# 저장소 루트를 sys.path에 넣는다. `cli.py`가 루트에 있고 `src.autoapply.*`를
+# 그 위치 기준으로 import하기 때문이다 (진입점 경로는 launchd 계약이라 못 옮긴다).
+pythonpath = ["."]
+testpaths = ["tests"]
