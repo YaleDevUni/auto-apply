@@ -24,6 +24,7 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/bin/bash</string>
         <string>__REPO__/schedule/run.sh</string>
         <string>night</string>
     </array>

@@ -698,6 +698,30 @@ def _source_stamp() -> float:
     return max(stamps) if stamps else 0.0
 
 
+HEARTBEAT_KEY = "listen_heartbeat"
+
+
+def _beat(conn: sqlite3.Connection) -> None:
+    """"나 아직 돌고 있다"를 한 줄 남긴다. `schedule/watchdog.sh`가 이걸 읽는다.
+
+    에폭 초로 적는 이유: 읽는 쪽이 bash다. 이 저장소의 `now()`는
+    `2026-08-17T18:22:04+09:00` 꼴인데, BSD `date`의 `%z`는 오프셋의 콜론을
+    못 읽는다. 감시자가 파이썬을 못 쓰는 상황(= .venv가 사라진 상황)을 위해
+    만든 장치인데 파싱에 파이썬이 필요하면 앞뒤가 안 맞는다.
+
+    프로세스가 살아 있느냐만 뜻한다. 텔레그램이 안 잡히는 동안에도 뛴다 —
+    그건 drain()이 WARNING으로 따로 남긴다.
+    """
+    import time
+
+    try:
+        set_setting(conn, HEARTBEAT_KEY, str(int(time.time())))
+    except Exception as e:  # noqa: BLE001
+        # 심장박동을 못 적는 건 리스너가 멈출 이유가 안 된다. 감시자가 대신
+        # 죽었다고 보고 재시작할 텐데, 그건 이 상황에서 나쁜 선택이 아니다.
+        log.warning("심장박동 기록 실패: %s", e)
+
+
 def watch(conn: sqlite3.Connection, *, wait: int = 25) -> None:
     """상시 대기하며 즉시 응답한다. 별도 launchd 에이전트가 이걸 돌린다.
 
@@ -721,9 +745,11 @@ def watch(conn: sqlite3.Connection, *, wait: int = 25) -> None:
 
     log.info("텔레그램 대기 시작 (롱폴링 %d초)", wait)
     stamp = _source_stamp()
+    _beat(conn)
     while True:
         try:
             drain(conn, wait=wait)
+            _beat(conn)
         except KeyboardInterrupt:
             raise
         except Exception as e:  # noqa: BLE001

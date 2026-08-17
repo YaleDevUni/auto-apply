@@ -13,17 +13,24 @@ mkdir -p "$HOME/Library/LaunchAgents" "$REPO/data/logs"
 git -C "$REPO" config core.hooksPath .githooks
 echo "커밋 훅 등록: $(git -C "$REPO" config --get core.hooksPath)"
 
-# scrape — 12:00 한 번. 수집 + 판정만
-# night  — 02:00 한 번. 지원준비를 목표건수/대기열 소진까지(수집은 안 함). 알림은 안 보냄
-# flush  — 09:00 한 번. 밤사이 쌓인 알림을 몰아서 보냄
-# listen — 상시 대기. 폰에서 온 메시지·버튼에 즉시 답한다
+# scrape   — 12:00 한 번. 수집 + 판정만
+# night    — 02:00 한 번. 지원준비를 목표건수/대기열 소진까지(수집은 안 함). 알림은 안 보냄
+# flush    — 09:00 한 번. 밤사이 쌓인 알림을 몰아서 보냄
+# listen   — 상시 대기. 폰에서 온 메시지·버튼에 즉시 답한다
+# watchdog — 5분마다. listen이 죽었는지 보고, 죽었으면 되살리고 폰으로 알린다
+#
+# 모든 잡의 ProgramArguments[0]이 /bin/bash인 것은 의도다. 2026-08-17에 `.venv`가
+# 없는 상태로 bootstrap 된 잡들이 launchd 스폰 단계에서 실패했는데(EX_CONFIG 78),
+# 그러면 stdout/stderr 로그가 **0바이트**라 고장이 침묵과 구분되지 않는다.
+# .venv가 돌아온 뒤에도 KeepAlive가 못 살렸다. /bin/bash로 한 겹 받으면 스폰은
+# 언제나 성공하고, 무엇이 없는지가 로그에 글자로 남는다.
 #
 # 예전 com.autoapply.cycle(2시간마다)은 폐기됐다 — 남아 있으면 night/flush와
 # 겹쳐 돈다. 처음 설치하는 자리에서 확실히 내린다.
 launchctl bootout "gui/$UID/com.autoapply.cycle" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.autoapply.cycle.plist"
 
-for LABEL in com.autoapply.scrape com.autoapply.night com.autoapply.flush com.autoapply.listen; do
+for LABEL in com.autoapply.scrape com.autoapply.night com.autoapply.flush com.autoapply.listen com.autoapply.watchdog; do
   DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
   sed -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" "$REPO/schedule/$LABEL.plist" > "$DEST"
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
@@ -34,4 +41,5 @@ done
 echo
 echo "해제:   launchctl bootout gui/$UID/<라벨>"
 echo "즉시실행: launchctl kickstart -p gui/$UID/com.autoapply.night"
-echo "로그:   tail -f $REPO/data/logs/scrape.out.log $REPO/data/logs/night.out.log $REPO/data/logs/flush.out.log $REPO/data/logs/listen.out.log"
+echo "로그:   tail -f $REPO/data/logs/scrape.out.log $REPO/data/logs/night.out.log $REPO/data/logs/flush.out.log $REPO/data/logs/listen.out.log $REPO/data/logs/watchdog.out.log"
+echo "상태:   launchctl list | grep autoapply   # listen 줄 첫 칸이 PID면 살아 있는 것"

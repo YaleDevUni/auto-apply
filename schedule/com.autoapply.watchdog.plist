@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  리스너 감시자 — 5분마다 상주 리스너가 살아 있는지 보고, 죽었으면 되살리고 알린다.
+
+  KeepAlive가 있는데 왜 또 감시하냐면: 2026-08-17에 KeepAlive가 **못 살렸다.**
+  `.venv`가 없는 상태에서 잡이 bootstrap 되자 launchd의 스폰이 ENOENT로 실패했고
+  (`last exit code = 78: EX_CONFIG`), `.venv`가 돌아온 뒤에도 launchd는 그 상태에서
+  빠져나오지 못했다. 418번 재시도해 418번 죽었고, 프로세스가 안 떴으니 로그는
+  0바이트였다 — **조용한 것과 잘 도는 것이 구분되지 않았다.** 6시간 동안 폰에서
+  보낸 명령 4건이 사라졌고, 결국 사람이 발견했다.
+
+  ProgramArguments[0]이 /bin/bash인 이유가 그것이다. 저장소가 통째로 없어져도
+  스폰은 성공하고, 무엇이 없는지가 로그에 글자로 남는다. 스크립트를 직접
+  가리키면(실행 비트가 빠졌거나 파일이 없을 때) 이 잡도 같은 방식으로
+  조용히 죽는다 — 감시자가 감시자를 필요로 하게 된다.
+
+  StartInterval: 리스너가 죽어 있는 시간의 상한이 5분이 된다.
+  RunAtLoad: 설치 직후 한 번 돌아 지금 상태를 확인한다.
+
+  설치: schedule/install.sh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.autoapply.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__REPO__/schedule/watchdog.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/logs/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/logs/watchdog.err.log</string>
+</dict>
+</plist>

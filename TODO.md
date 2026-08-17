@@ -282,6 +282,12 @@ flowchart TD
       listen) 전부 재등록해 `launchctl list`로 확인(listen이 bootout/bootstrap
       경합으로 한 번 실패했다가 재시도로 정상화 — install.sh는 순차 실행이라
       드물게 이 경합이 날 수 있다는 걸 남겨둔다).
+- [x] **launchd 고장이 침묵과 구분되게** (2026-08-17). 리스너가 6시간 죽어
+      있었는데 로그가 0바이트라 아무도 몰랐다. 모든 잡의 진입점을 `/bin/bash`로
+      바꾸고(스폰은 언제나 성공 → 고장이 로그에 글자로 남는다),
+      `com.autoapply.watchdog`(5분 주기)이 리스너 생사·심장박동을 보고
+      bootout+bootstrap으로 되살린 뒤 폰으로 알린다. 자세한 내용은
+      [NEXT.md](NEXT.md) 참고
 - [ ] 끝나면 텔레그램으로 완료 보고
 
 ### P1 — 커버리지

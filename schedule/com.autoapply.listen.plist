@@ -11,12 +11,22 @@
   KeepAlive: 죽으면 다시 띄운다. 맥이 잠들거나 네트워크가 끊기는 일이 잦다.
   ThrottleInterval: 재시작 폭주를 막는다.
 
-  EnvironmentVariables/PATH: 이 잡은 run.sh를 안 거치고 launchd가 python을
-  바로 띄운다. launchd 기본 PATH엔 claude CLI가 없어서, 이 리스너가
-  subprocess.Popen으로 띄우는 모든 서브프로세스(/guide, /지원시작, /improve,
-  수정요청 재작성)가 PATH를 그대로 물려받아 "claude CLI를 찾을 수 없다"로
+  PATH: 이 리스너가 subprocess.Popen으로 띄우는 모든 서브프로세스(/guide,
+  /지원시작, /improve, 수정요청 재작성)가 PATH를 그대로 물려받는다. launchd
+  기본 PATH엔 claude CLI가 없어서, 예전에 그것들이 "claude CLI를 찾을 수 없다"로
   조용히(stdout/stderr가 DEVNULL이라) 죽었다 — 실제로 /guide 요청 하나가
-  이렇게 사라졌다. run.sh가 스스로 export하는 PATH와 그대로 맞춘다.
+  이렇게 사라졌다. 실제 export는 listen.sh가 하고, 여기 값은 그와 같게 둔 이중
+  안전장치다.
+
+  ProgramArguments[0]이 `.venv/bin/python`이 **아니라** `/bin/bash`인 이유:
+  2026-08-17에 `.venv`가 없는 상태로 이 잡이 bootstrap 되자 launchd의 스폰이
+  ENOENT로 실패했다. 그러면 `last exit code = 78: EX_CONFIG`만 남고 stdout/stderr
+  로그는 0바이트다 — 프로세스가 안 떴으니 쓸 주체가 없다. 로그만 봐서는 "조용히
+  잘 돌고 있다"와 구분되지 않았다. 게다가 `.venv`가 4분 뒤 돌아왔는데도
+  KeepAlive가 못 살렸다(`runs = 418`, kickstart도 안 통하고 bootout+bootstrap이라야
+  살아남). 6시간 동안 폰 명령 4건이 응답 없이 사라졌다.
+  `/bin/bash`는 없어지지 않는다. listen.sh가 한 겹 받으면 무엇이 없든 로그에
+  글자가 남고, 감시자(com.autoapply.watchdog)가 그걸 보고 알린다.
 
   설치: schedule/install.sh
 -->
@@ -27,10 +37,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>__REPO__/.venv/bin/python</string>
-        <string>__REPO__/cli.py</string>
-        <string>listen</string>
-        <string>--watch</string>
+        <string>/bin/bash</string>
+        <string>__REPO__/schedule/listen.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
