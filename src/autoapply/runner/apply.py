@@ -266,21 +266,22 @@ def _step(s: PlaywrightSession, step: dict[str, Any], job: dict[str, Any]) -> No
             return
         raise RecipeError(f"요소를 찾지 못함: {sel}  —  화면이 바뀌었을 수 있다")
 
-    if act == "click" or act == "submit":
-        _click(s, sel, optional=optional, submit=(act == "submit"))
-    elif act == "check":
-        s.check(sel)
-    elif act == "fill":
-        s.fill(sel, _render(step["value"], job))
-    elif act == "upload":
-        path = _render(step["path"], job)
-        if not Path(path).exists():
-            raise RecipeError(f"업로드할 파일이 없다: {path}")
-        s.upload(sel, path)
-    elif act == "expect":
-        pass  # 위의 exists 검사가 곧 단언이다
-    else:
-        raise RecipeError(f"모르는 스텝: {act}")
+    match act:
+        case "click" | "submit":
+            _click(s, sel, optional=optional, submit=(act == "submit"))
+        case "check":
+            s.check(sel)
+        case "fill":
+            s.fill(sel, _render(step["value"], job))
+        case "upload":
+            path = _render(step["path"], job)
+            if not Path(path).exists():
+                raise RecipeError(f"업로드할 파일이 없다: {path}")
+            s.upload(sel, path)
+        case "expect":
+            pass  # 위의 exists 검사가 곧 단언이다
+        case _:
+            raise RecipeError(f"모르는 스텝: {act}")
 
 
 def _confirm(s: PlaywrightSession, recipe: dict[str, Any]) -> bool:
