@@ -252,6 +252,8 @@ CREATE TABLE IF NOT EXISTS resume_builds (
     track         TEXT,                      -- 어느 트랙에 맞춰 썼는지
     headline      TEXT,                      -- 한 줄 타이틀 (적합도 비교용)
     skills        TEXT NOT NULL DEFAULT '[]',-- 실제로 등록된 스킬
+    -- 이력서로는 충족 못 하는 공고 요구(증명서 첨부 등). 승인 알림이 읽어 폰에 띄운다.
+    manual_todos  TEXT NOT NULL DEFAULT '[]',
     -- 이 공고가 어디까지 갔나. 다음 실행이 여기서 이어받는다 (assemble.progress).
     --   assembled   조립 완료 (LLM 결과 있음)
     --   filling     이력서를 채우는 중 — 끊기면 절반만 채워진 것이 남을 수 있다
@@ -479,6 +481,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         # 공고에 맞춰 에이전트가 고른 포트폴리오 제목(원티드 표기 그대로, NFC).
         # resume_title과 같은 자리에 둔다 — 지원 단계가 여기서 읽어 레시피에 넘긴다.
         "portfolio_title": "TEXT",
+        # 이력서 본문으로는 충족할 수 없는 공고 요구(증명서 첨부, 파일 업로드,
+        # 이메일 별도 송부 등). JSON 배열. 승인 알림이 여기서 읽어 폰에 띄운다 —
+        # 본문에 "첨부하였습니다"라고 쓰면 하지 않은 일을 했다고 쓰는 것이 된다.
+        "manual_todos": "TEXT NOT NULL DEFAULT '[]'",
         # 어디까지 갔나. 중단·고장 뒤에 처음부터 다시 하지 않기 위한 것이다.
         "stage": "TEXT",
         "stage_at": "TEXT",

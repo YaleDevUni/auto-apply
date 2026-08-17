@@ -153,6 +153,9 @@ flowchart TD
       공고에 맞는 저장소를 보여줄 자리가 여기뿐이다. 가이드 §3.4 표에 없는 URL은
       코드가 줄째 지우고(`_strip_unknown_links`), 글자수 보강이 삼킨 `[...]` 블록은
       되붙인다(`_restore_blocks`)
+- [x] **이력서로는 못 하는 공고 요구는 폰 승인 화면에만**(§9, `manual_todos`) —
+      증명서 첨부·사전과제 같은 것. 본문에 적으면 안 한 일을 했다고 쓰는 것이 된다.
+      포트폴리오는 `portfolio_match`가 자동 첨부하므로 이 목록에서 제외한다
 - [x] **가이드에서 사라져 있던 §6-1(AI 활용)·§7-1(비개발 재해석) 복원** —
       코드(`assemble._track_block`, `_drop_manual_fields`)와 `/guide` 안내문이
       가리키는 절이 정작 문서에 없었다. AI/LLM 우선순위가 참조하던 `(F) Gemini

@@ -817,8 +817,13 @@ def _report_prepared(target: dict, result: dict, *, defer: bool = False) -> None
         if target.get("url"):
             links.append(f'🔗 <a href="{target["url"]}">공고 보기</a>')
 
+        # 이력서 본문으로는 못 하는 요구(성적증명서 첨부, 포트폴리오 파일 별도
+        # 업로드, 이메일 송부 등)는 여기서만 알린다. 본문에 적으면 하지 않은 일을
+        # 했다고 쓰는 것이 되고, 승인 화면 밖에서는 사람이 볼 자리가 없다.
         caption = (
-            f"📄 <b>지원 준비됨</b>\n{head}{verdict}\n\n"
+            f"📄 <b>지원 준비됨</b>\n{head}{verdict}"
+            + _asm.todo_block(_asm.manual_todos(target["job_id"], conn))
+            + "\n\n"
             + ("  ·  ".join(links) + "\n\n" if links else "")
             + "<i>이력서는 이미 만들어져 있습니다. 승인하면 그대로 제출합니다.</i>"
         )

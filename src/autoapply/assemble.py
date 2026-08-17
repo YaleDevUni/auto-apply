@@ -483,7 +483,7 @@ def build(
 
 EDITOR_SCHEMA = """{
   "headline": "한 줄 타이틀 (공고에 맞춰 매번 다시 씀)",
-  "summary": "간단 소개. 가이드 §2-1의 네 덩어리를 그 순서대로 넣는다. 덩어리 사이에는 빈 줄 하나.\n  ① 첫 줄: 한 문장 요약 (무엇을 하는 개발자인가). 이 공고의 1순위 역량이 이 줄에 들어간다\n  ② '· ' 로 시작하는 핵심역량 불릿 4개. 각 한 줄, 태도가 아니라 역량/경험 단위\n  ③ 가이드 §8의 [대표 프로젝트] 블록 100~300자. '[대표 프로젝트] 이름 — 한 줄 소개' + '· ' 불릿 1~2개(성과 수치 필수) + 마지막 줄에 URL 하나. URL은 가이드 §3.4 표의 값을 그대로 옮긴다 — 조합해 만들지 않는다. 비공개 프로젝트는 링크가 없으므로 이 블록에 쓰지 않는다\n  전체 **550~850자**. 원티드가 400자 미만이면 이력서 완성도를 깎으므로 반드시 넘긴다. 줄바꿈(\\n)을 실제로 넣는다 — 한 문단으로 붙이지 않는다",
+  "summary": "간단 소개. 가이드 §2-1의 네 덩어리를 그 순서대로 넣는다. 덩어리 사이에는 빈 줄 하나.\n  ① 첫 줄: 한 문장 요약 (무엇을 하는 개발자인가). 이 공고의 1순위 역량이 이 줄에 들어간다\n  ② '· ' 로 시작하는 핵심역량 불릿 4개. 각 한 줄, 태도가 아니라 역량/경험 단위\n  ③ 가이드 §8의 [대표 프로젝트] 블록 100~300자. '[대표 프로젝트] 이름 — 한 줄 소개' + '· ' 불릿 1~2개(성과 수치 필수) + 마지막 줄에 URL 하나. URL은 가이드 §3.4 표의 값을 그대로 옮긴다 — 조합해 만들지 않는다. 비공개 프로젝트는 링크가 없으므로 이 블록에 쓰지 않는다\n  ④ 가이드 §9 — 공고가 자기소개·지원동기·산출물 링크 등을 따로 요구했을 때만. 요구가 없으면 이 덩어리는 통째로 없다\n  전체 **550~850자**. 원티드가 400자 미만이면 이력서 완성도를 깎으므로 반드시 넘긴다. 줄바꿈(\\n)을 실제로 넣는다 — 한 문단으로 붙이지 않는다",
   "experiences": [
     {"company": "회사명", "job_role": "직무", "business_title": "직책",
      "start": "YYYY.MM", "end": "YYYY.MM",
@@ -502,8 +502,8 @@ EDITOR_SCHEMA = """{
   "_note_language": "level은 원티드 선택지 문구를 그대로 써야 한다: 유창함 | 고급 비즈니스 레벨 | 비즈니스 레벨 | 일상 회화. 다른 표현을 쓰면 선택지를 못 찾아 비워둔 채 지나간다. 가이드에 '영어 유창'만 있으면 '고급 비즈니스 레벨'로 적는다.",
   "skills": ["스킬", "나열"],
   "links": [{"name": "GitHub", "url": "https://..."}],
-  "gaps": [{"level": "필수|우대", "text": "공고 요건 중 근거가 없는 항목"}]
-
+  "gaps": [{"level": "필수|우대", "text": "공고 요건 중 근거가 없는 항목"}],
+  "manual_todos": ["공고가 요구하는데 이력서 본문으로는 충족할 수 없는 것만. 첨부·업로드·별도 송부·사전 응시처럼 사람이 직접 해야 하는 것이다(성적증명서·졸업증명서 첨부, 자격증 사본, 이메일 별도 송부, 회사 자체 양식 작성 등). 각 항목은 60자 이내 한 줄. 글로 쓸 수 있는 요구는 여기가 아니라 summary ④블록에 넣는다. **포트폴리오 첨부는 넣지 않는다** — 파이프라인이 공고에 맞는 파일을 골라 지원 폼에서 자동으로 첨부한다. 없으면 빈 배열"]
 }"""
 
 
@@ -614,7 +614,11 @@ def build_editor_json(
 URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝트는 링크가 없으므로 내용으로만
 쓰고, 링크는 공개 저장소 중 다음으로 맞는 것을 고른다.
 
-
+**공고가 이 가이드에 없는 제출 요구를 했으면 §9대로 가른다.** 자기소개·지원동기·
+산출물 링크·블로그처럼 글로 쓸 수 있는 것은 summary ④블록에 넣고, 증명서 첨부·
+별도 송부·사전과제처럼 사람이 해야 하는 것은 `manual_todos`에 적는다. 첨부하지 않은 것을
+"첨부하였습니다"라고 쓰지 않는다. **포트폴리오 첨부는 `manual_todos`에 넣지 않는다** —
+파이프라인이 공고에 맞는 포트폴리오를 골라 지원 폼에서 자동으로 첨부한다.
 
 **사고 과정을 출력하지 않는다.** "공고는 ~이므로 §7 조합으로 구성했다" 같은 문장은
 이력서 내용이 아니다. 실측에서 그런 문장이 간단 소개 맨 앞에 그대로 들어갔다.
@@ -658,6 +662,7 @@ URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝�
     _ensure_summary_length(data, job, guide)
     _strip_reasoning(data)  # 보강 응답에도 섞일 수 있다
     _strip_unknown_links(data, guide)  # 보강도 지어낼 수 있다. 저장 전에 한 번 더
+    todos = _normalize_todos(data)
 
     gaps = data.get("gaps") or []
     required = [g for g in gaps if g.get("level") == "필수"]
@@ -683,7 +688,7 @@ URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝�
     _save_build(
         job_id, len(required) <= max_gaps, required, gaps, conn,
         track=job.get("track"), headline=data.get("headline"),
-        portfolio_title=portfolio_title,
+        portfolio_title=portfolio_title, manual_todos=todos,
     )
 
     return {
@@ -693,6 +698,7 @@ URL은 §3.4 표의 값을 **글자 그대로** 옮긴다. 비공개 프로젝�
         "ok": len(required) <= max_gaps,
         "required_gaps": len(required),
         "gaps": gaps,
+        "manual_todos": todos,
         "path": str(path) if path else None,
         "portfolio_title": portfolio_title,
         "data": data,
@@ -792,6 +798,50 @@ def _strip_unknown_links(data: dict[str, Any], guide: str) -> None:
     data["summary"] = re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
 
 
+# 파이프라인이 이미 하는 일. 사람 할 일 목록에 오르면 안 된다 —
+# 포트폴리오는 `portfolio_match`가 공고를 읽고 골라 지원 폼에서 자동으로 첨부한다.
+# 할 일 없는 안내가 매번 뜨면 그 목록 전체가 무시되고, 진짜 할 일까지 묻힌다.
+AUTOMATED_TODO = re.compile(r"포트폴리오|portfolio", re.IGNORECASE)
+
+
+def _normalize_todos(data: dict[str, Any]) -> list[str]:
+    """`manual_todos`를 문자열 목록으로 고른다.
+
+    모델이 `{"item": ...}` 꼴로 주기도 해서 한 번 편다. 폰 승인 캡션은 1024자
+    제한이라 여기서 개수·길이를 자른다 — 보낼 때 자르면 무엇이 잘렸는지 안 남는다.
+    """
+    raw = data.get("manual_todos") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    todos: list[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict):
+            item = item.get("text") or item.get("item") or ""
+        text = " ".join(str(item).split()).strip("-·• ")
+        # 스키마의 설명문을 그대로 베껴 오는 경우가 있다. 그건 할 일이 아니다.
+        if not text or "빈 배열" in text or len(text) > 120:
+            continue
+        if AUTOMATED_TODO.search(text):
+            log.info("포트폴리오는 파이프라인이 자동 첨부 — 할 일에서 제외: %s", text[:40])
+            continue
+        todos.append(text[:80])
+    data["manual_todos"] = todos[:5]
+    return data["manual_todos"]
+
+
+def todo_block(todos: list[str]) -> str:
+    """폰 승인 캡션에 붙일 '사람이 직접 할 일' 블록. 없으면 빈 문자열.
+
+    이력서 본문으로는 충족할 수 없는 요구(증명서 첨부 등)를 여기서만 알린다.
+    본문에 적으면 하지 않은 일을 했다고 쓰는 것이 된다.
+    """
+    if not todos:
+        return ""
+    lines = "\n".join(f"• {t[:60]}" for t in todos[:3])
+    more = f"\n<i>외 {len(todos) - 3}건</i>" if len(todos) > 3 else ""
+    return f"\n\n🖐 <b>이력서로는 안 되는 요구</b>\n{lines}{more}"
+
+
 def _drop_manual_fields(data: dict[str, Any]) -> None:
     """사람이 직접 등록한 필드를 조립 결과에서 지운다.
 
@@ -836,7 +886,7 @@ def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str
 ② `· ` 로 시작하는 핵심역량 불릿 4개
 ③ `[대표 프로젝트] 이름 — 한 줄 소개` + `· ` 불릿 1~2개(성과 수치 필수)
    + 마지막 줄에 URL 하나. 100~300자
-④ 그 밖에 `[...]` 로 시작하는 블록이 이미 있으면 그대로 둔다. 없으면 만들지 않는다
+④ 이미 있으면 그대로 둔다. 없으면 만들지 않는다
 
 규칙:
 - 불릿 개수를 늘리지 말고 **각 불릿의 내용을 구체화**한다
@@ -869,7 +919,8 @@ def _ensure_summary_length(data: dict[str, Any], job: dict[str, Any], guide: str
 def _restore_blocks(old: str, new: str) -> str:
     """보강이 통째로 날린 `[...]` 블록을 되붙인다.
 
-    보강은 간단 소개 **전체**를 새로 받는다. 그래서 `[대표 프로젝트]` 블록이 조용히 사라질 수 있는데, 그건 공고가 명시적으로 요구한
+    보강은 간단 소개 **전체**를 새로 받는다. 그래서 ④블록(§9, 공고가 따로 요구한
+    자기소개·지원동기)이 조용히 사라질 수 있는데, 그건 공고가 명시적으로 요구한
     항목이라 없어지면 서류 검토도 못 받는다. "그대로 둬라"는 지시로는 부족하다 —
     이 저장소가 프롬프트 대신 코드로 막아온 것들과 같은 부류다.
 
@@ -918,6 +969,7 @@ def _save_build(
     track: str | None = None,
     headline: str | None = None,
     portfolio_title: str | None = None,
+    manual_todos: list[str] | None = None,
 ) -> None:
     """조립 결과를 남긴다.
 
@@ -932,21 +984,27 @@ def _save_build(
     portfolio_title도 같은 이유로 여기 둔다 — 지원 단계가 이력서 제목과
     같은 자리에서 읽어 레시피에 넘긴다.
 
+    manual_todos(이력서로는 충족 못 하는 공고 요구)도 여기 둔다. 승인 알림은
+    조립과 **다른 프로세스**에서 만들어지므로(cycle-apply → 폰), 메모리로는 못
+    넘긴다. 캐시된 조립을 재사용해도 같은 안내가 나가야 한다.
     """
     own = conn is None
     conn = conn or connect()
     try:
         conn.execute(
             """INSERT INTO resume_builds
-                 (job_id, ok, required_gaps, gaps, track, headline, portfolio_title, built_at)
-               VALUES (?,?,?,?,?,?,?,?)
+                 (job_id, ok, required_gaps, gaps, track, headline, portfolio_title,
+                  manual_todos, built_at)
+               VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(job_id) DO UPDATE SET
                  ok=excluded.ok, required_gaps=excluded.required_gaps,
                  gaps=excluded.gaps, track=excluded.track,
                  headline=excluded.headline, portfolio_title=excluded.portfolio_title,
+                 manual_todos=excluded.manual_todos,
                  built_at=excluded.built_at""",
             (job_id, 1 if ok else 0, len(required),
-             json.dumps(gaps, ensure_ascii=False), track, headline, portfolio_title, now()),
+             json.dumps(gaps, ensure_ascii=False), track, headline, portfolio_title,
+             json.dumps(manual_todos or [], ensure_ascii=False), now()),
         )
         conn.commit()
     finally:
@@ -964,7 +1022,7 @@ def _load_cached(
     conn = conn or connect()
     try:
         row = conn.execute(
-            "SELECT ok, required_gaps, gaps, portfolio_title, built_at "
+            "SELECT ok, required_gaps, gaps, portfolio_title, manual_todos, built_at "
             "FROM resume_builds WHERE job_id=?",
             (job_id,),
         ).fetchone()
@@ -992,6 +1050,7 @@ def _load_cached(
             "ok": bool(row["ok"]),
             "required_gaps": row["required_gaps"],
             "gaps": json.loads(row["gaps"] or "[]"),
+            "manual_todos": json.loads(row["manual_todos"] or "[]"),
             "path": str(path),
             "portfolio_title": row["portfolio_title"],
             "cached": True,
@@ -1201,6 +1260,30 @@ def registration(job_id: int, conn: sqlite3.Connection | None = None) -> dict[st
             (job_id,),
         ).fetchone()
         return dict(row) if row else {}
+    finally:
+        if own:
+            conn.close()
+
+
+def manual_todos(job_id: int, conn: sqlite3.Connection | None = None) -> list[str]:
+    """이 공고에서 사람이 직접 해야 하는 일. 없으면 빈 목록.
+
+    승인 알림을 만드는 쪽이 읽는다. 조립 결과(JSON 파일)가 아니라 DB에서 읽는
+    이유는 승인 알림이 조립과 다른 프로세스에서 만들어지기 때문이다.
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        row = conn.execute(
+            "SELECT manual_todos FROM resume_builds WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if not row or not row["manual_todos"]:
+            return []
+        try:
+            items = json.loads(row["manual_todos"])
+        except json.JSONDecodeError:
+            return []
+        return [str(x) for x in items] if isinstance(items, list) else []
     finally:
         if own:
             conn.close()
