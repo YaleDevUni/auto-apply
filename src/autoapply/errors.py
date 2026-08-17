@@ -200,6 +200,14 @@ def _record(
     else:
         tb = ""
 
+    # 봇 토큰이 DB(error_queue)에도, 뒤이은 폰 알림에도 평문으로 남지 않게 가린다.
+    # command에는 `telegram-setup <token>` 같은 CLI 인자가 그대로 들어올 수 있다.
+    from .notify.telegram import mask_token
+
+    message = mask_token(message)
+    tb = mask_token(tb)
+    command = mask_token(command)
+
     if exc_type in SKIP_TYPES:
         return {"recorded": False, "reason": f"{exc_type}은 전용 경로가 있다"}
 

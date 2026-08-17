@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,22 @@ API = "https://api.telegram.org/bot{token}/{method}"
 
 S_TOKEN = "telegram_bot_token"
 S_CHAT = "telegram_chat_id"
+
+# 텔레그램 봇 토큰 모양(`<봇id 숫자>:<35자 안팎 문자열>`)을 로그·기록에서 가린다.
+#
+# 이 토큰은 요청 URL 경로(`/bot<token>/getMethod`)에 그대로 박히고, `getUpdates`
+# 롱폴링(`listener.watch`, 25초 간격)이 그 URL로 계속 요청을 보낸다. `cli.py`가
+# `logging.basicConfig(level=INFO)`를 켜두므로 httpx가 요청마다 남기는 INFO 로그
+# ("HTTP Request: GET https://.../bot<token>/getUpdates ...")가 그대로
+# `listen.err.log`에 평문으로 쌓인다. `errors.record()`가 저장하는 예외
+# 메시지·traceback·명령행(`telegram-setup <token>` 같은)에도 같은 문제가 있다 —
+# 한 자리에서 가려서 두 경로 모두 막는다.
+_TOKEN_RE = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{30,}")
+
+
+def mask_token(text: str) -> str:
+    """텍스트 안의 텔레그램 봇 토큰을 가린다. 토큰이 없으면 그대로 돌려준다."""
+    return _TOKEN_RE.sub("<TELEGRAM_TOKEN>", text or "")
 
 
 class TelegramNotConfigured(RuntimeError):

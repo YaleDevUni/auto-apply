@@ -194,6 +194,22 @@ def main() -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr
     )
+    # httpx가 요청마다 INFO로 남기는 URL에 텔레그램 봇 토큰이 그대로 박혀 있다
+    # (`/bot<token>/getUpdates`). 상주 리스너가 25초마다 롱폴링하므로 필터 없이는
+    # listen.err.log에 토큰이 계속 평문으로 쌓인다. 핸들러에 걸어야
+    # httpx·urllib3처럼 이 프로세스가 부르지 않은 로거의 레코드도 걸러진다 —
+    # 로거에 걸면 그 로거가 직접 낸 레코드에만 적용된다.
+    class _TokenRedactFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            try:
+                record.msg = telegram.mask_token(record.getMessage())
+                record.args = ()
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+    for _h in logging.getLogger().handlers:
+        _h.addFilter(_TokenRedactFilter())
 
     # 오래 도는 명령만 '지금 도는 작업'으로 등록한다. 폰에서 /running으로 보고
     # /stop으로 멈출 수 있는 대상이 이 목록이다. 짧게 끝나는 조회 명령까지
