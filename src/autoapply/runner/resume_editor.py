@@ -952,8 +952,16 @@ def finalize(page) -> bool:
 
 
 # 편집기 상단에 제목과 나란히 오는 고정 문구들. 제목이 아니다.
+#
+# '포지션 맞춤 이력서 리뷰'는 조각('포지션'/'맞춤 리뷰'/'이력서 리뷰')으로도,
+# 이어붙은 한 줄로도 나온다. 왼쪽 리뷰 패널이 열려 있으면 사이드바 탭이
+# 조각으로, 패널 제목이 한 줄로 — 같은 화면에 두 꼴이 동시에 나온다.
 TITLE_CHROME = ("이전 페이지", "기본 이력서 설정", "기본 이력서", "한국어", "영어",
-                "작성 완료", "작성 중", "포지션", "맞춤 리뷰", "이력서 리뷰")
+                "작성 완료", "작성 중", "포지션", "맞춤 리뷰", "이력서 리뷰",
+                "포지션 맞춤 이력서 리뷰")
+
+# 제목이 사는 곳. 클래스는 해시가 붙지만 앞머리는 안 바뀐다.
+EDITOR_HEADER = 'header[class*="ResumeHeader_"]'
 
 
 def read_title(page) -> str:
@@ -964,14 +972,39 @@ def read_title(page) -> str:
     정할 수 없으므로 빈 문자열을 돌려주고 호출부가 멈춘다.
 
     앵커 하나('기본 이력서 설정')에 기대면 안 된다 — 그 이력서가 기본으로
-    지정되면 문구가 '기본 이력서'로 바뀌어 앵커가 사라진다. 상단 줄들에서
-    고정 문구를 걷어내고 남는 첫 줄을 제목으로 본다.
+    지정되면 문구가 '기본 이력서'로 바뀌어 앵커가 사라진다. 고정 문구를
+    걷어내고 남는 첫 줄을 제목으로 본다.
+
+    ## body가 아니라 header에서 읽는다 (2026-08-17 실측)
+
+    예전에는 `body` 앞 12줄을 봤다. 그 12줄 안에 **편집기 바깥 것**이 섞여
+    들어온다: 왼쪽 'AI 이력서 리뷰' 패널이 열려 있으면 그 패널 제목
+    '포지션 맞춤 이력서 리뷰'가 8번째 줄에 들어앉는다. 그게 그대로 이력서
+    제목으로 기록됐고, 지원 단계에서 그 이름의 이력서를 목록에서 찾다가
+    `RecipeError: 요소를 찾지 못함`으로 죽었다 — 이력서는 멀쩡히 등록돼
+    있는데도 그랬다. 헤더 안에서 읽으면 패널이 뜨든 말든 상관이 없다.
+
+    ## 길이로 자르지 않는다
+
+    같은 실측에서 진짜 제목('노타(Nota) [인턴] [NetsPresso] AI Software
+    Enginee #16', 52자)이 옛 `len(ln) > 40` 조건에 걸려 통째로 버려졌다.
+    제목은 회사명과 공고 제목을 이어 붙여 만들므로 40자는 늘 넘는다. 길이는
+    제목인지 아닌지를 가르는 근거가 아니다.
     """
-    lines = [ln.strip() for ln in page.inner_text("body").splitlines()[:12] if ln.strip()]
-    for ln in lines:
-        if ln in TITLE_CHROME or len(ln) > 40:
-            continue
-        return ln
+    hdr = page.locator(EDITOR_HEADER).first
+    if hdr.count():
+        for ln in (hdr.inner_text() or "").splitlines():
+            ln = ln.strip()
+            if ln and ln not in TITLE_CHROME:
+                return ln
+
+    # 헤더를 못 찾는 경우(레이아웃 개편 등)의 그물. body를 보되 같은 규칙을
+    # 쓴다 — 길이로 자르지 않고 고정 문구만 걷어낸다.
+    log.info("편집기 헤더를 못 찾았다 — body 앞부분에서 제목을 찾는다")
+    for ln in page.inner_text("body").splitlines()[:12]:
+        ln = ln.strip()
+        if ln and ln not in TITLE_CHROME:
+            return ln
     return ""
 
 
