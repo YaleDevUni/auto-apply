@@ -26,7 +26,24 @@
        검증: httpx.post 모킹, 5000자 입력 → 전송 payload 4096자로 잘림 확인,
        짧은 텍스트는 그대로 감을 확인. pytest 153건 통과(회귀 없음).
        텔레그램 실전송은 안 함(무인 새벽 회차, 알림 금지).
-3. [ ] 봇 토큰이 로그·오류 기록에 평문으로 남는다 (아래 "알려진 결함" 참고)
+3. [x] **봇 토큰이 로그·오류 기록에 평문으로 남는다** (2026-08-18 새벽 회차에서
+       고침) — `notify/telegram.py`에 `mask_token()`을 두고 두 지점에서
+       썼다: `cli.py`의 `logging.basicConfig` 핸들러에 redact 필터로 걸어
+       httpx의 `getUpdates` 요청 INFO 로그(`listen.err.log`에 25초마다
+       쌓이던 것)를 가리고, `errors._record()`에서 message/traceback/command를
+       DB(error_queue)에 넣기 전에 마스킹해 그 뒤 이어지는 폰 알림 본문까지
+       같이 가렸다.
+       검증: `mask_token()` 단위 확인, `errors.record()`를 격리된 임시 DB로
+       실제로 돌려 토큰이 든 예외+command가 세 컬럼 모두 마스킹돼 저장되는지
+       확인, httpx 스타일 INFO 로그 레코드를 같은 필터로 흘려 출력에 토큰이
+       없는지 확인. pytest 153건 통과(회귀 없음).
+       함정: 첫 검증에서 `connect()` 기본 인자가 실제 운영 DB임을 놓치고
+       테스트 로우를 실제 `data/jobs.db`에 심었고, `_trigger_plan()`이 실제
+       `cli.py plan` 서브프로세스까지 띄웠다 — 그 자리에서 프로세스를 죽이고
+       테스트 로우 삭제, `tasks.active()`로 죽은 running_tasks 행 정리로
+       복구(fix_plans에 새 계획은 안 생겼다). 이후엔 `connect(tempfile 경로)`로
+       완전히 격리해서 재검증했다. **다음에 `errors.record()`를 실 DB로
+       테스트할 일이 있으면 반드시 임시 경로를 인자로 명시할 것.**
 
 ## 운영 구조 — 다음 회차 (2026-08-18 합의)
 
@@ -60,9 +77,8 @@ FastAPI는 여기에 HTTP 껍데기를 씌우는 것뿐이라 지금은 필요 �
 
 - [x] ~~텔레그램 `notify()`에만 길이 제한이 없다~~ — 위 보안 섹션 2번에서
       고침(2026-08-18 새벽 회차)
-- [ ] 봇 토큰이 로그·오류 기록에 평문으로 남는다. `errors.record()`에 마스킹이
-      없고, httpx의 정상 INFO 로그가 `getUpdates` URL을 통째로 찍어 25초마다
-      `listen.err.log`에 들어간다
+- [x] ~~봇 토큰이 로그·오류 기록에 평문으로 남는다~~ — 위 보안 섹션 3번에서
+      고침(2026-08-18 새벽 회차)
 - [ ] 상주 브라우저 홀더 프로세스가 샌다 — `session.py`의 `_kill_resident()`는
       CDP 포트를 LISTEN하는 pid(=크롬)만 죽인다. `_spawn_resident()`가 띄운
       파이썬 홀더(`while True: time.sleep(3600)`)는 별개 pid라 아무도 안 죽인다
