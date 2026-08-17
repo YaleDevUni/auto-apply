@@ -46,17 +46,17 @@ def spy(monkeypatch, capsys):
 # ── Step 1~4에서 옮겨지는 함수들 ────────────────────────────────────────
 # 이동 후에는 patch 대상이 workflows/notify 쪽으로 바뀐다.
 
-def test_night_cycle(spy):
+def test_night_cycle(spy_module):
     """run.sh와 폰 /apply가 둘 다 이 경로로 온다. defer가 키워드여야 한다."""
-    spy("_night_cycle")
-    spy.dispatch(cmd="night-cycle", target=30, defer=True)
-    assert spy.calls == [((30,), {"defer": True})]
+    spy_module(cli.night_cycle, "run")
+    spy_module.dispatch(cmd="night-cycle", target=30, defer=True)
+    assert spy_module.calls == [((30,), {"defer": True})]
 
 
-def test_cycle_apply(spy):
-    spy("_cycle_apply")
-    spy.dispatch(cmd="cycle-apply", limit=1, defer=False)
-    assert spy.calls == [((1,), {"defer": False})]
+def test_cycle_apply(spy_module):
+    spy_module(cli.night_cycle, "cycle_apply")
+    spy_module.dispatch(cmd="cycle-apply", limit=1, defer=False)
+    assert spy_module.calls == [((1,), {"defer": False})]
 
 
 @pytest.fixture

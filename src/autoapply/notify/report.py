@@ -198,3 +198,28 @@ def tell(text: str) -> None:
         log.warning("알림 실패: %s", e)
     finally:
         conn.close()
+
+
+def circuit_break(key: str, count: int, prepared: int, attempted: int) -> None:
+    """왜 대기열이 남았는데 멈췄는지 폰에 알린다.
+
+    이 알림이 없으면 "목표 5건인데 2건만 하고 끝났다"가 대기열 소진과 구별되지
+    않는다. 둘은 정반대다 — 하나는 할 일이 없는 것이고 하나는 망가진 것이다.
+    """
+    import html
+
+    from . import telegram
+
+    conn = connect()
+    try:
+        telegram.notify(
+            conn,
+            f"🛑 <b>같은 오류가 {count}번 — 지원준비를 접습니다</b>\n\n"
+            f"<i>{html.escape(key[:250])}</i>\n\n"
+            f"준비 {prepared}건 / 시도 {attempted}건에서 멈췄습니다. "
+            "대기열은 남아 있지만 다음 공고도 같은 자리에서 죽습니다.\n"
+            "<i>고장 큐에 쌓였습니다 — <code>/errors</code> 로 보고 "
+            "<code>/plan</code> 으로 수정 계획을 세울 수 있습니다.</i>",
+        )
+    finally:
+        conn.close()
