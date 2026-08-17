@@ -104,6 +104,21 @@ def _consume_restart_flag() -> str | None:
 # 위에서 우리 작업이 돈다.
 _TAB_FILE = BROWSER_DIR.parent / ".browser_tab"
 
+# _spawn_resident()가 띄운 파이썬 홀더(`while True: sleep`)의 pid.
+#
+# 왜 필요한가(2026-08-18 실측): _kill_resident()는 CDP_PORT를 LISTEN하는
+# pid(=크롬)만 찾아서 죽인다. 그 크롬을 띄운 **부모** 파이썬 홀더는 다른
+# pid라 lsof에 안 잡히고, 크롬이 죽어도 자기는 `sleep(3600)` 루프에 그대로
+# 남는다. 실측(2026-08-18): 8/18일 새벽 시점에 일요일 오후부터 쌓인 홀더가
+# 8개 — 전부 크롬은 이미 죽고 Playwright driver(node)만 매단 채 살아 있었다.
+# 스폰 시점에 pid를 여기 적어두고, 죽일 때 짝지어 같이 죽인다.
+_HOLDER_PID_FILE = BROWSER_DIR.parent / ".browser_holder_pid"
+
+# _kill_holder()가 pid 재활용을 걸러내는 근거. _spawn_resident()가 띄우는
+# -c 스크립트에만 나오는 문자열이라 다른 프로세스가 우연히 같은 pid를 받아도
+# 오인해서 죽이지 않는다.
+_HOLDER_MARKER = "PlaywrightSession(hidden=False)"
+
 
 def _resident_pids() -> list[int]:
     """CDP_PORT를 LISTEN 중인 프로세스 pid 목록."""
@@ -166,6 +181,41 @@ def resident_owner() -> tuple[str, int, str]:
     return "none", 0, ""
 
 
+def _remember_holder(pid: int) -> None:
+    try:
+        _HOLDER_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _HOLDER_PID_FILE.write_text(str(pid), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.debug("홀더 pid 기록 실패(무시): %s", e)
+
+
+def _remembered_holder() -> int:
+    try:
+        return int(_HOLDER_PID_FILE.read_text(encoding="utf-8").strip())
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _kill_holder() -> None:
+    """_spawn_resident()가 띄운 파이썬 홀더를 죽인다. **우리가 띄운 것만.**
+
+    크롬(자식)과 달리 홀더(부모)는 CDP_PORT로 찾을 수 없다 — 스폰 시점에
+    기록해 둔 pid로만 찾는다. 그 pid가 재활용됐을 수 있으니(오래 지난 뒤
+    호출될 수도 있다) 명령줄에 우리 마커가 남아 있는지 확인한 뒤에만 죽인다.
+    """
+    import subprocess
+
+    pid = _remembered_holder()
+    if not pid:
+        return
+    if _HOLDER_MARKER in _cmdline(pid):
+        try:
+            subprocess.run(["kill", str(pid)], timeout=5, check=False)
+        except Exception:  # noqa: BLE001
+            pass
+    _HOLDER_PID_FILE.unlink(missing_ok=True)
+
+
 def _kill_resident() -> None:
     """상주 브라우저를 종료한다. **우리가 띄운 것만.**
 
@@ -175,16 +225,19 @@ def _kill_resident() -> None:
     import subprocess
 
     who, pid, cmd = resident_owner()
-    if who != "ours":
-        if who == "foreign":
-            log.warning("CDP %d를 우리 것이 아닌 프로세스가 잡고 있다(pid %d) — 죽이지 않는다: %s",
-                        CDP_PORT, pid, cmd[:120])
-        return
-    try:
-        subprocess.run(["kill", str(pid)], timeout=5, check=False)
-    except Exception:  # noqa: BLE001
-        pass
-    _TAB_FILE.unlink(missing_ok=True)
+    if who == "ours":
+        try:
+            subprocess.run(["kill", str(pid)], timeout=5, check=False)
+        except Exception:  # noqa: BLE001
+            pass
+        _TAB_FILE.unlink(missing_ok=True)
+    elif who == "foreign":
+        log.warning("CDP %d를 우리 것이 아닌 프로세스가 잡고 있다(pid %d) — 죽이지 않는다: %s",
+                    CDP_PORT, pid, cmd[:120])
+
+    # 크롬을 죽여도(또는 애초에 못 띄워도) 그 부모 홀더는 별도 pid라 안 죽는다.
+    # who와 무관하게 항상 시도한다 — 실패한 스폰이 남긴 홀더도 여기서 걷힌다.
+    _kill_holder()
 
 
 def _spawn_resident(*, wait_sec: int = 20) -> bool:
@@ -199,7 +252,7 @@ def _spawn_resident(*, wait_sec: int = 20) -> bool:
 
     from ..paths import CODE_ROOT
 
-    subprocess.Popen(
+    proc = subprocess.Popen(
         [str(CODE_ROOT / ".venv/bin/python"), "-c",
          "import sys; sys.path.insert(0,'.');"
          "from src.autoapply.runner.session import PlaywrightSession;"
@@ -209,6 +262,10 @@ def _spawn_resident(*, wait_sec: int = 20) -> bool:
          "while True: time.sleep(3600)"],
         cwd=str(CODE_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
     )
+    # _kill_resident()가 크롬(자식)을 죽인 뒤 이 홀더(부모)도 짝지어 죽일 수
+    # 있게 pid를 남긴다. 아래 대기가 실패해 False를 반환해도 이 프로세스는
+    # 계속 살아있으므로 반드시 여기서 기록해야 한다.
+    _remember_holder(proc.pid)
     # "포트가 응답한다"가 아니라 "**우리 프로필**의 크롬이 그 포트를 잡았다"를
     # 기다린다. 남의 크롬이 이미 9222를 잡고 있으면 우리 크롬은 그 포트에
     # 바인딩하지 못하는데, 응답만 보면 그걸 성공으로 읽는다.
