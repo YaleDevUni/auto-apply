@@ -1,3 +1,132 @@
+## cli.py가 곧 workflow였다 — 가운데 층을 세운다 (2026-08-18)
+
+`CLAUDE.md`를 헌법으로 다시 쓴 뒤 §10·§11이 지목한 1순위를 실제로 뜯었다.
+진단부터 다시 했는데, "아키텍처가 없다"가 아니라 **가운데가 비어 있었다.**
+
+    위 (진입점)    cli.py(1486), notify/listener.py(997)        있다
+    가운데         workflow / service / domain                  ← 없다
+    아래 (인프라)  db, llm, runner, adapters, notify, screening  있고 잘 갈렸다
+
+SOLID로 보면 SRP·DIP는 명백한 위반인데 **OCP는 오히려 지켜져 있었다** —
+`adapters/REGISTRY` + `recipes/*.json` 덕에 새 플랫폼이 열려 있고, CSS 셀렉터가
+`recipes/`·`adapters/`·`runner/` **밖에서 0건**이다. §12 플랫폼 경계는 통과였다.
+그래서 표적이 어댑터가 아니라 가운데 한 층으로 좁혀졌다.
+
+    cli.py 1486 → 556줄 (-63%)
+
+    notify/report.py          queue, flush, prepared, tell, circuit_break
+    workflows/context.py      job, skip_if_already_applied
+    workflows/submit_application.py   apply_with, apply_job, submit_registered,
+                                      notify_submitted, delete_submitted_resume
+    workflows/prepare_application.py  run, resume_title
+    workflows/night_cycle.py  run, cycle_apply, note_stage_failure
+    workflows/revise_application.py   run
+    llm.cost_report / assemble.builds_log / orchestrator.recent_plans
+
+### 옮길 수 있으려면 진입점을 모르게 해야 한다
+
+이번 회차에 새로 지킨 규칙은 하나다: **workflow는 진입점을 모른다.**
+`print`/`_out`/`sys.exit`/`argparse.Namespace`를 쓰지 않는다. Phase 2에서
+FastAPI가 같은 함수를 그대로 부를 수 있어야 하기 때문이다.
+
+### 순서를 뒤집어야 했다 — 의존은 아래에서 위로 간다
+
+계획은 night_cycle부터 옮기는 것이었는데, `_cycle_apply`가 `_autoapply`와
+`_report_prepared`를 부른다. 그대로 옮기면 `workflows/` → `cli` 역방향
+import가 생긴다. **report → submit → prepare → night_cycle** 순으로 갔다.
+
+`context.py`를 따로 둔 것도 같은 이유다. `_apply_with`도 `_skip_if_already_applied`를
+부르므로 prepare와 submit이 **둘 다** 쓴다. 한쪽에 두면 다른 쪽이 그쪽을
+import하게 되고, 그러면 두 workflow가 서로를 알게 된다.
+
+### 손으로 옮겨 적지 않았다 — AST로 옮기고 AST로 대조했다
+
+옮긴 함수 13개 전부, 의도한 이름/상대 import/모듈 접두어를 정규화하면 원본과
+**한 줄도 다르지 않다**는 것을 매 커밋에서 기계로 확인했다. 순수 이동이라는
+말을 사람 눈으로 보증할 수 있는 분량이 아니었다.
+
+### 테스트가 0건이었다 — 그물부터 세웠다
+
+`tests/` 신설(144 passed). 셋으로 나뉜다.
+
+    test_cli_surface.py     cli.py의 CLI 표면은 **프로세스 경계 계약**이다.
+                            run.sh·listen.sh·listener.py·orchestrator.py가
+                            문자열로 부른다. 이 파일은 이동으로 한 줄도 안 바뀐다.
+    test_dispatch_routing.py  이동 중 오배선 탐지. patch 대상 이름은 이동
+                            커밋마다 바뀌는 게 정상이고, 단정이 바뀌면 그건
+                            이동이 아니라 동작 변경이다.
+    test_imports.py         모듈을 **깨끗한 프로세스에서 하나씩** import한다.
+                            한 프로세스에서 전부 하면 sys.modules 캐시가 순환을
+                            가려준다. orchestrator ↔ listener가 서로를 지역
+                            import로 회피 중인 것도 여기서 지킨다.
+
+### 목이 가린 자리를 실주행이 잡았다 — 그래서 스모크 테스트를 더 만들었다
+
+`_llm_cost`를 `llm.py`로 옮기며 `connect` import를 빠뜨렸다(이 파일은 함수-지역
+import를 쓴다). **라우팅 테스트는 초록불이었다** — `cost_report`를 통째로 가짜로
+바꾸니 안에서 `NameError`가 나든 말든 안 보인다. `cli.py llm-cost 1`을 손으로
+돌려서야 나왔다. `test_readonly_smoke.py`는 SELECT만 하는 함수를 **진짜로** 부른다
+(쓰기·전송·브라우저는 안 넣는다 — 테스트가 폰을 울리면 안 된다).
+
+같은 이유로 **검증으로 돌리면 안 되는 것**을 골라냈다. `flush-notify`는 미발송
+2건이 쌓여 있어 돌리면 폰에 실제로 나가고, `night-cycle`은 이력서를 조립하고
+알림까지 보낸다. 그건 검증이 아니라 실행이다. 대신 조기 반환 경로(빈 대기열)와
+브라우저 dry-run(`apply_with(live=False)` → `[dry-run] 6:submit 건너뜀` → 증적)로
+확인했다.
+
+### 상주 리스너가 스스로 새 코드로 재기동하는 것을 실측했다
+
+`src/autoapply/` 아래를 바꾼 커밋 직후 pid 22285 → 62874. 로그에 "소스가
+바뀌었다 — 새 코드로 다시 뜬다". 새 코드를 저장소 루트가 아니라 반드시
+`src/autoapply/` 아래에 둬야 하는 이유가 이것이다(`listener.py:696`의 감시 목록).
+
+### 남은 것 — Phase 2로 미룬 것들
+
+**상주 서버 흡수(FastAPI).** 지금 모든 긴 작업이 `subprocess.Popen`이라
+(listener에서 spawn 7곳) 프로세스들이 서로를 모른다. 그 결과가 이미 위에
+기록돼 있다: night-cycle 3개 동시 생존, `/stop`의 부분 도달, 홀더 프로세스
+누수, spawn 로그 비대칭. `session.py:202-209`가 띄우는
+`while True: time.sleep(3600)`은 **하는 일이 "살아 있기"뿐**이라 서버가
+브라우저를 소유하면 통째로 사라진다.
+
+규모는 생각보다 작다. `tasks.py`가 **이미 잡 레지스트리다**(register/finish/
+running/cancelled/check/active/select/request_stop). 프로세스에 묶인 곳은 셋뿐
+(`spawn`/`_alive`/`_terminate`)이고 취소 프로토콜과 `running_tasks` 기록은
+그대로 산다.
+
+**착수 전에 답이 있어야 하는 것 셋:**
+
+1. **크래시 안전성이 공짜가 아니게 된다.** 지금은 프로세스가 죽으면
+   `stage='filling'`이 DB에 남고 다음 실행이 그 이력서를 버린다 — 이 성질이
+   프로세스 격리에서 공짜로 온다. 한 프로세스 안에서는 의도적으로 지켜야 한다
+   (블로킹 작업을 이벤트 루프 밖으로, 취소가 subprocess까지 닿게, 재시작 시 복구).
+2. **폭발 반경이 모인다.** watchdog는 단순해지지만(`/healthz` 하나) 대상이
+   유일해진다. `sqlite3`+`curl`만 쓴다는 제약은 유지해야 한다.
+3. **`orchestrator.py:96`의 검증 관문을 새로 설계해야 한다.** 지금은
+   `shell=False` + cli.py 읽기·dry-run 명령만 통과다. 로컬 포트가 `--live`
+   제출 권한을 갖게 된다.
+
+**그 밖에 이번에 확인만 하고 안 고친 것:**
+
+- **`render.py`(183줄)가 어디서도 import되지 않는다.** 죽은 코드다.
+- **`orchestrator.py` ↔ `notify/listener.py` 순환.** 양쪽이 함수-지역
+  import로 회피 중이다(`orchestrator.py:528,727` ↔ `listener.py:540,558`).
+  끊는 게 맞지만 이번 회차의 "이동만 한다" 밖이다.
+- **repository 계층 부재.** 13개 파일이 각자 SQL을 쓰고 `db.py`가 내주는
+  헬퍼는 8개뿐이다. 이번엔 `cli.py`분만 소유 모듈로 돌려보냈다.
+- **domain 모델 부재.** Job·Application·Resume·Receipt·ReviewDecision이
+  클래스로 하나도 없고 전부 `dict`/`sqlite3.Row`다. 유일한 관련 타입이
+  `adapters/base.py:18`의 `JobPosting`인데 그마저 adapter 계층에 있다.
+- **`cli.py`에 아직 남은 것**: `_browser_open`(runner/session이 소유해야 한다),
+  `_guide`/`_guide_message`(가이드 편집 workflow), `_revlog`. §11의 5개 목록
+  밖이라 이번엔 안 건드렸다.
+- **텔레그램 봇 토큰이 로그에 평문으로 남는다.** 예외 메시지만이 아니라
+  httpx의 정상 INFO 로그가 `getUpdates` URL을 통째로 찍어서 `listen.err.log`에
+  25초마다 토큰이 들어간다. 아래 '곁가지'에 적어둔 것보다 범위가 넓다.
+- **`report.circuit_break(prepared: int)`가 모듈의 `prepared()` 함수와 이름이
+  겹친다.** 파라미터가 이겨서 동작에는 문제가 없고(순수 이동을 지키려고 그대로
+  뒀다) 나중에 헷갈릴 자리다.
+
 ## 지원이 죽은 건 세션 만료가 아니라 이력서 '제목'이었다 (2026-08-17)
 
 사람이 "로그인 세션 만료된 것 같다"고 했다. 아니었다 — `session-check`는
@@ -337,11 +466,12 @@ night-cycle은 안에서 `is_paused`에 걸려 0초에 죽었고 출력은 /dev/
 이어받으면 수정 지시가 통째로 무시된 채 옛 이력서가 "재작성됨"으로 폰에 다시
 올라가고, 사람은 고쳐진 줄 알고 승인한다.
 
-### 곁가지: record_registration이 두 번 정의돼 있었다
+### 곁가지: record_registration이 두 번 정의돼 있었다 — **해소됨 (2026-08-18 확인)**
 
-앞엣것(913행)은 `fill_report`를 안 쓴다. 지금은 뒤엣것이 살아 있어 문제가
-없지만, 순서가 바뀌면 `orchestrator._editor_items()`가 읽는 유일한 신호가
-사라진다 — 편집기가 망가져도 자가개선이 아무것도 못 보는 상태로 되돌아간다.
+앞엣것(913행)은 `fill_report`를 안 썼다. 지금은 `assemble.py`에 하나뿐이라
+(`^def record_registration` 전 저장소 1건) 이 항목은 닫는다. 남겨둔 이유가
+있던 걱정 — 순서가 바뀌면 `orchestrator._editor_items()`가 읽는 유일한 신호가
+사라진다 — 은 중복이 없어졌으므로 더는 성립하지 않는다.
 
 ## 전 구간 무인 실주행 시도 — 한도에 막혔고, 막히는 방식이 고장이었다 (2026-08-17)
 
