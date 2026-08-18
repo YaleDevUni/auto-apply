@@ -18,6 +18,7 @@ import pytest
 
 from src.autoapply import agent, assemble, health, llm, orchestrator
 from src.autoapply.db import connect
+from src.autoapply.workflows import context
 
 
 def test_llm_cost_report_all():
@@ -58,6 +59,16 @@ def test_health_runs_without_notifying():
     """`notify=False`가 아니면 이 테스트가 폰을 울린다."""
     out = health.run(notify=False)
     assert "findings" in out
+
+
+def test_skip_if_already_applied_resolves_job_lookup():
+    """지역변수 `job`이 모듈 함수 `job()`을 가리면 여기서 잡힌다.
+
+    없는 공고라 SELECT 한 번 뒤 SystemExit로 끝난다 — preflight(브라우저)에는
+    닿지 않는다. 이름이 다시 가려지면 UnboundLocalError가 나 실패한다.
+    """
+    with pytest.raises(SystemExit):
+        context.skip_if_already_applied(999999)
 
 
 def test_next_targets():

@@ -83,10 +83,11 @@ def skip_if_already_applied(job_id: int) -> dict | None:
     from ..runner import apply as apply_mod
     from ..runner.lock import BrowserBusy
 
-    log = logging.getLogger(__name__)
-    job = job(job_id)
+    # 이 함수 안에서 `job`을 지역변수로 쓰면 모듈 함수 `job()`이 가려져
+    # 호출 시점에 UnboundLocalError가 난다. 그래서 `job_row`다.
+    job_row = job(job_id)
     try:
-        state = apply_mod.preflight(job)
+        state = apply_mod.preflight(job_row)
     except BrowserBusy:
         raise
     except Exception as e:  # noqa: BLE001
@@ -100,7 +101,7 @@ def skip_if_already_applied(job_id: int) -> dict | None:
     return {
         "already_applied": True,
         "stopped": "이미 지원한 공고 — 준비하지 않는다",
-        "company": job.get("company"),
-        "url": job.get("url"),
+        "company": job_row.get("company"),
+        "url": job_row.get("url"),
         "기록": "apply_ledger status=external (대기열에서 영구 제외, 제출 건수·한도에는 안 셈)",
     }
