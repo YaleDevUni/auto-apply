@@ -22,6 +22,7 @@ v2는 완전 자동화가 목표라 그 게이트를 기본값으로 넣지 않�
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -41,6 +42,20 @@ API = "https://api.telegram.org/bot{token}/{method}"
 S_TOKEN = "telegram_bot_token"
 S_CHAT = "telegram_chat_id"
 
+# 텔레그램이 거부하는 길이. 넘기면 400 Bad Request다.
+TEXT_LIMIT = 4096
+PHOTO_CAPTION_LIMIT = 1024
+
+# 실제로 쓰는 값은 상한이 아니라 이 여유값이다. 두 가지 이유가 있다:
+#
+# 1. 텔레그램은 길이를 **UTF-16 코드유닛**으로 센다. 이 저장소의 알림은 거의
+#    매번 앞에 이모지(📄 ⚠️ ...)가 붙고, 이모지 하나가 파이썬 `len()`으로는
+#    1인데 텔레그램에게는 2다. `len(text) == 4096`이 400을 받을 수 있다.
+# 2. 자른 자리에 생략 표시(`…N자 생략`)를 덧붙이므로 그 자리도 남겨야 한다.
+SAFE_TEXT = 3900
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
 # 텔레그램 봇 토큰 모양(`<봇id 숫자>:<35자 안팎 문자열>`)을 로그·기록에서 가린다.
 #
 # 이 토큰은 요청 URL 경로(`/bot<token>/getMethod`)에 그대로 박히고, `getUpdates`
@@ -56,6 +71,48 @@ _TOKEN_RE = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{30,}")
 def mask_token(text: str) -> str:
     """텍스트 안의 텔레그램 봇 토큰을 가린다. 토큰이 없으면 그대로 돌려준다."""
     return _TOKEN_RE.sub("<TELEGRAM_TOKEN>", text or "")
+
+
+def _clip(text: str, limit: int = SAFE_TEXT) -> str:
+    """상한을 넘는 본문을 **HTML이 깨지지 않는 자리**에서 자른다.
+
+    단순 `text[:limit]`으로는 부족하다 — 우리는 `parse_mode='HTML'`로 보내므로
+    `<pre>`나 `&lt;` 한가운데가 잘리면 텔레그램이 다시 400(can't parse entities)을
+    돌려주고, 그러면 자른 보람도 없이 알림이 사라진다.
+
+    정규식이 필요한 일이 아니라 `str.rfind`만 쓴다.
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return text
+
+    head = text[:limit]
+
+    # 줄 단위로 물러난다. 단 너무 많이 버려야 하면(줄바꿈 없는 한 줄짜리 긴
+    # 본문) 하드컷을 쓴다 — 안 그러면 거의 전부를 버린다.
+    nl = head.rfind("\n")
+    if nl >= limit // 2:
+        head = head[:nl]
+
+    # 태그 반토막(`<b` / `<pre`)과 엔티티 반토막(`&lt`)을 버린다.
+    lt = head.rfind("<")
+    if lt > head.rfind(">"):
+        head = head[:lt]
+    amp = head.rfind("&")
+    if amp > head.rfind(";"):
+        head = head[:amp]
+
+    return f"{head}\n<i>…{len(text) - len(head)}자 생략</i>"
+
+
+def _strip_html(text: str) -> str:
+    """HTML 파싱이 실패했을 때 평문으로 다시 보내기 위한 변환.
+
+    태그를 걷어낸 뒤 `html.unescape()`까지 하는 이유: 상류가 사용자·플랫폼
+    문자열을 `html.escape()`로 감싸 넘기므로, 그냥 태그만 지우면 평문 알림에
+    `&lt;script&gt;` 같은 게 그대로 보인다.
+    """
+    return html.unescape(_TAG_RE.sub("", text or ""))
 
 
 class TelegramNotConfigured(RuntimeError):
@@ -86,6 +143,9 @@ def _call(
 
     httpx.HTTPError만 재시도한다 — 연결 오류·타임아웃·5xx가 여기 걸린다.
     `ok: false` 응답(잘못된 토큰 등 영구 실패)은 재시도해도 안 풀리므로 뺀다.
+    같은 이유로 **400 같은 4xx도 재시도하지 않는다**(429는 예외 — 그건 기다리면
+    풀린다). 본문이 너무 길거나 HTML이 깨진 요청은 몇 번을 다시 보내도 같은 답을
+    받고, 3초만 버린 뒤 호출부의 폴백을 그만큼 늦춘다.
     """
     import time
 
@@ -95,7 +155,13 @@ def _call(
             r = httpx.post(API.format(token=token, method=method), json=payload, timeout=30)
             r.raise_for_status()
             break
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            if (
+                isinstance(e, httpx.HTTPStatusError)
+                and 400 <= e.response.status_code < 500
+                and e.response.status_code != 429
+            ):
+                raise
             if attempt < retries:
                 time.sleep(retry_wait)
                 continue
@@ -201,7 +267,11 @@ def send_photo(
         return False
     try:
         token, chat = _creds(conn)
-        data = {"chat_id": chat, "caption": caption[:1024], "parse_mode": "HTML"}
+        data = {
+            "chat_id": chat,
+            "caption": _clip(caption, PHOTO_CAPTION_LIMIT),
+            "parse_mode": "HTML",
+        }
         if buttons:
             # 되돌릴 수 없는 동작 앞의 게이트다. 사람이 사진을 보고 누른다.
             data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
@@ -226,17 +296,40 @@ def notify(conn: sqlite3.Connection, text: str) -> bool:
     """일방향 알림. 실패해도 본 작업(수집·판정)을 막지 않는다.
 
     반환값은 성공 여부다 — 실패를 조용히 삼키되, 호출부가 로그에 남길 수 있게 알려준다.
+
+    이 함수가 실패하면 **사람에게 알릴 다른 통로가 없다**(폰 명령의 응답,
+    `cli.py`의 보고가 여기로 나간다). 그래서 세 가지를 이 자리에서 감당한다:
+
+    - 상한 4096은 UTF-16 기준이라 `SAFE_TEXT`로 여유를 둔다(`_clip` 주석 참조)
+    - **잘려서라도 보내는 편이 사라지는 것보다 낫다** — 400을 받으면 그 알림은
+      호출부가 재발송하지 않으므로 그 자리에서 영영 없어진다
+    - HTML이 깨져 400이 나면 `parse_mode`를 빼고 평문으로 한 번 더 보낸다.
+      서식이 빠진 알림은 읽을 수 있지만, 안 온 알림은 읽을 수 없다
     """
     try:
         token, chat = _creds(conn)
         _call(
-            token, "sendMessage", chat_id=chat, text=text[:4096],
+            token, "sendMessage", chat_id=chat, text=_clip(text),
             parse_mode="HTML", disable_web_page_preview=True,
         )
         return True
     except TelegramNotConfigured:
         log.info("텔레그램 미설정 — 알림 건너뜀: %s", text[:50])
         return False
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 400:
+            log.warning("텔레그램 알림 실패(무시): %s", e)
+            return False
+        try:
+            _call(
+                token, "sendMessage", chat_id=chat, text=_clip(_strip_html(text)),
+                disable_web_page_preview=True,
+            )
+        except Exception as e2:  # noqa: BLE001
+            log.warning("텔레그램 알림 실패(무시): %s", e2)
+            return False
+        log.warning("텔레그램 400(%s) — 평문으로 재전송함", e)
+        return True
     except Exception as e:  # noqa: BLE001
         log.warning("텔레그램 알림 실패(무시): %s", e)
         return False
@@ -250,11 +343,16 @@ def notify_with_buttons(
     승인 게이트가 늘 사진을 갖고 있는 건 아니다 — 지원서 검토는 채워진 폼
     사진으로 판단하지만, 수정 계획 승인은 글로 판단한다. 그때 `notify()`를
     쓰면 버튼이 통째로 사라져서 **누를 것이 없는 승인 요청**이 도착한다.
+
+    길이·HTML 처리는 `notify()`와 같다. 여기가 특히 걸리기 쉬운 이유: 수정 계획
+    승인 본문은 커밋 메시지를 `<pre>...</pre>`로 감싸 여러 줄에 걸치므로, 하드컷은
+    그 태그를 반으로 가른다. 평문 폴백에서도 `reply_markup`은 반드시 유지한다 —
+    버튼이 이 함수의 존재 이유다.
     """
     try:
         token, chat = _creds(conn)
         _call(
-            token, "sendMessage", chat_id=chat, text=text[:4096],
+            token, "sendMessage", chat_id=chat, text=_clip(text),
             parse_mode="HTML", disable_web_page_preview=True,
             reply_markup={"inline_keyboard": buttons},
         )
@@ -262,6 +360,21 @@ def notify_with_buttons(
     except TelegramNotConfigured:
         log.info("텔레그램 미설정 — 알림 건너뜀: %s", text[:50])
         return False
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 400:
+            log.warning("버튼 알림 실패(무시): %s", e)
+            return False
+        try:
+            _call(
+                token, "sendMessage", chat_id=chat, text=_clip(_strip_html(text)),
+                disable_web_page_preview=True,
+                reply_markup={"inline_keyboard": buttons},
+            )
+        except Exception as e2:  # noqa: BLE001
+            log.warning("버튼 알림 실패(무시): %s", e2)
+            return False
+        log.warning("텔레그램 400(%s) — 평문으로 재전송함(버튼 유지)", e)
+        return True
     except Exception as e:  # noqa: BLE001
         log.warning("버튼 알림 실패(무시): %s", e)
         return False
