@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -93,3 +94,34 @@ def test_orchestrator_listener_cycle_is_gone():
             [sys.executable, "-c", order], cwd=ROOT, capture_output=True, text=True, timeout=60,
         )
         assert proc.returncode == 0, f"`{order}` 실패:\n{proc.stderr[-2000:]}"
+
+
+def test_prepare_application_calls_qualified_apply_with():
+    """`workflows/prepare_application.py`가 `apply_with`를 맨 이름으로 부르지 않는가.
+
+    실측(2026-08-18): `cli.py`에서 workflows/로 옮기며(7b05c73) `submit_application.
+    apply_with(...)`가 `apply_with(...)`로 남았다 — `submit_application`만 모듈
+    수준으로 import돼 있어 파이썬은 이걸 미정의 전역으로 본다. import 시점에는
+    안 죽고(함수 본문 안이라 지연 바인딩) **실제 지원준비가 이력서 등록까지
+    끝난 뒤 지원 폼 진입 직전**에야 `NameError: name 'apply_with' is not defined`로
+    죽는다 — 실제 night-cycle 실행(공고 35·37·48)에서 매번 그 자리에서
+    재현했다. import 테스트(`test_module_imports_alone`)로는 못 잡는 부류다.
+
+    AST로 `run()` 함수 안의 `Call` 노드를 훑어 이름이 그냥 `apply_with`인
+    호출이 없는지(반드시 `submit_application.apply_with`처럼 속성 접근이어야
+    한다) 확인한다. 브라우저·DB·LLM에 전혀 닿지 않는 순수 정적 검사다.
+    """
+    src = (PKG / "workflows" / "prepare_application.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    run_fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "run"
+    )
+    bare_calls = [
+        n.func.id for n in ast.walk(run_fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "apply_with"
+    ]
+    assert not bare_calls, (
+        "prepare_application.run()이 apply_with를 맨 이름으로 부른다 — "
+        "submit_application.apply_with(...)로 한정해야 한다 (NameError 재발)"
+    )

@@ -71,7 +71,7 @@ def run(job_id: int, *, resume_url: str | None, live: bool, reuse: bool = True) 
         tasks.check("지원 폼 진입 전")
         job = context.job(job_id, resume_title=prog["resume_title"], require_resume=True)
         with browser_lock("지원준비", label=f"공고 {job_id}"):
-            result = apply_with(job, live=live)
+            result = submit_application.apply_with(job, live=live)
         assemble.set_stage(job_id, "prepared")
         reg = assemble.registration(job_id)
         return {
@@ -138,7 +138,7 @@ def run(job_id: int, *, resume_url: str | None, live: bool, reuse: bool = True) 
         # 안 남는다 — 지원 폼은 dry-run이라 바깥세상에 아무것도 안 낸다.
         tasks.check("지원 폼 진입 전")
         job = context.job(job_id, resume_title=title, require_resume=True)
-        result = apply_with(job, live=live)
+        result = submit_application.apply_with(job, live=live)
     assemble.set_stage(job_id, "prepared")
     return {
         "company": built["company"],
