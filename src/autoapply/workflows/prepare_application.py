@@ -65,7 +65,6 @@ def run(job_id: int, *, resume_url: str | None, live: bool, reuse: bool = True) 
     # 자세한 재사용 규칙은 assemble.progress의 주석에 있다.
     prog = assemble.progress(job_id) if reuse else {"resumable": False}
     if prog["resumable"]:
-        log = logging.getLogger(__name__)
         log.info("공고 %s — %s 단계에서 이어받는다 (이력서 %r 재사용, 새로 안 만든다)",
                  job_id, prog["stage"], prog["resume_title"])
         tasks.check("지원 폼 진입 전")

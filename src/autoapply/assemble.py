@@ -893,8 +893,8 @@ def build_editor_json(
     # (Haiku는 §5 확정값을, Sonnet은 더 겸손하게 쓴 표현을), 그걸 차단에 쓰면 멀쩡한
     # 이력서가 선다. 되돌릴 수 없는 지점(제출) 앞에는 이미 사람이 있으므로,
     # 판단이 갈리는 지적은 그 사람에게 보낸다(승인 캡션의 ⚠️).
-    review_notes = _review_and_fix(data, job, guide, job_id, feedback)
-    notes.extend(review_notes)
+    fix_notes = _review_and_fix(data, job, guide, job_id, feedback)
+    notes.extend(fix_notes)
 
     gaps = data.get("gaps") or []
     required = [g for g in gaps if g.get("level") == "필수"]
